@@ -1,0 +1,30 @@
+{
+  "name": "al-mahik",
+  "version": "1.0.0",
+  "description": "WhatsApp backup bot: copies chats to (הודעות) groups and alerts on deleted/edited messages",
+  "main": "src/index.js",
+  "scripts": {
+    "start": "node src/index.js",
+    "dev": "PORT=3101 DATA_DIR=./.phone-data RUN_ON_PHONE=1 node src/index.js"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/rb077858/whatsapp-deleted.git"
+  },
+  "license": "UNLICENSED",
+  "bugs": {
+    "url": "https://github.com/rb077858/whatsapp-deleted/issues"
+  },
+  "homepage": "https://github.com/rb077858/whatsapp-deleted#readme",
+  "dependencies": {
+    "baileys": "7.0.0-rc14",
+    "firebase-admin": "^14.5.0",
+    "pino": "^9.14.0",
+    "qrcode": "^1.5.4"
+  },
+  "type": "module",
+  "engines": {
+    "node": ">=22.5"
+  },
+  "private": true
+}

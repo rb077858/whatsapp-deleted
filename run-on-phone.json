@@ -1,0 +1,15 @@
+{
+  "name": "אל-מחיק 🧽",
+  "description": "בוט וואטסאפ ששומר עותק של הודעות ומתריע על מחיקות ועריכות",
+  "entry": "src/index.js",
+  "args": [],
+  "nodeOptions": ["--max-old-space-size=384", "--disable-warning=ExperimentalWarning"],
+  "env": {},
+  "ui": [
+    { "label": "הגדרת שרת", "path": "/setup" },
+    { "label": "האתר", "path": "/" },
+    { "label": "ניהול", "path": "/admin" }
+  ],
+  "include": ["src", "web", ".npmrc"],
+  "exclude": ["data", ".phone-data"]
+}
