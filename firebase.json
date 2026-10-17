@@ -1,0 +1,13 @@
+{
+  "hosting": {
+    "public": "web",
+    "ignore": ["setup.html"],
+    "cleanUrls": true,
+    "rewrites": [{ "source": "**", "destination": "/index.html" }],
+    "headers": [{ "source": "**/*.@(js|css)", "headers": [{ "key": "Cache-Control", "value": "no-cache" }] }]
+  },
+  "firestore": {
+    "rules": "firestore.rules",
+    "indexes": "firestore.indexes.json"
+  }
+}

@@ -1,0 +1,48 @@
+<!doctype html>
+<html lang="he" dir="rtl">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>הגדרת שרת · אל-מחיק</title>
+  <link rel="icon" href="/logo.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="/style.css">
+</head>
+<body>
+  <header class="wrap nav"><span class="mark"><img src="/logo.svg" alt="" width="34" height="34">אל-מחיק · שרת</span></header>
+  <main class="wrap narrow page">
+    <h1>הגדרת שרת 🛠️</h1>
+    <p class="lead">העמוד הזה זמין רק מהטלפון שמריץ את הבוט.</p>
+    <div class="card" id="status"><div class="spinner"></div></div>
+    <div class="card">
+      <h2>חיבור ל-Firebase</h2>
+      <p class="hint">Firebase Console ← ⚙️ Project settings ← Service accounts ← <b>Generate new private key</b>. בחרו את הקובץ שירד, או הדביקו את התוכן שלו.</p>
+      <div id="msg"></div>
+      <div class="field"><input type="file" id="file" accept=".json,application/json"></div>
+      <div class="field"><textarea id="json" rows="5" placeholder='{"type": "service_account", ...}' style="width:100%;border-radius:14px;border:1.5px solid var(--line);background:var(--card);color:var(--ink);padding:12px;font:13px/1.4 monospace;direction:ltr"></textarea></div>
+      <button class="cta block" id="save">שמירה וחיבור</button>
+    </div>
+  </main>
+  <script>
+    const esc = s => String(s ?? '').replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]))
+    const $ = id => document.getElementById(id)
+    async function load () {
+      const s = await fetch('/setup/status').then(r => r.json())
+      const conns = s.connections.length ? s.connections.map(c => `<span class="status ${esc(c.status)}">${esc(c.id)}</span>`).join(' ') : '<span class="muted">אין עדיין</span>'
+      $('status').innerHTML = `<h2>מצב</h2>
+        <p style="margin:10px 0">${s.configured ? (s.connected ? '✅ מחובר ל-Firebase' : '⏳ מתחבר ל-Firebase…') : '⚠️ Firebase עוד לא הוגדר'} ${s.projectId ? `<span class="muted ltr">(${esc(s.projectId)})</span>` : ''}</p>
+        ${s.error ? `<div class="err">${esc(s.error)}</div>` : ''}
+        ${s.siteUrl ? `<p style="margin:10px 0">🌐 האתר: <a class="ltr" href="${esc(s.siteUrl)}" target="_blank">${esc(s.siteUrl)}</a> · <a href="${esc(s.siteUrl)}/admin" target="_blank">ניהול</a></p>` : ''}
+        <p class="muted">חיבורי וואטסאפ: ${conns}</p>`
+    }
+    $('file').onchange = async e => { const f = e.target.files[0]; if (f) $('json').value = await f.text() }
+    $('save').onclick = async () => {
+      $('msg').innerHTML = ''
+      const r = await fetch('/setup/service-account', { method: 'POST', body: $('json').value }).then(r => r.json()).catch(e => ({ error: e.message }))
+      $('msg').innerHTML = r.ok ? `<div class="ok">✅ נשמר! מחובר לפרויקט ${esc(r.projectId)}</div>` : `<div class="err">${esc(r.error)}</div>`
+      if (r.ok) $('json').value = ''
+      setTimeout(load, 1500)
+    }
+    load(); setInterval(load, 8000)
+  </script>
+</body>
+</html>
