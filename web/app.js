@@ -146,6 +146,61 @@ function serverPill () {
     : '<span class="pill off"><span class="dot"></span>השרת לא זמין כרגע</span>'
 }
 
+// ---------------- join buttons (with invite code when required) ----------------
+let verifiedInvite = null
+const needsInvite = () => server.status?.regMode === 'invite'
+
+/** Puts focus in the field with all of its text selected, so typing simply replaces a wrong code. */
+function selectAll (input) {
+  input.focus()
+  input.select()
+  try { input.setSelectionRange(0, input.value.length) } catch {}
+}
+
+function joinForm (label, extra = '') {
+  return `<form class="joinbox" data-join novalidate>
+    <div class="invfield" ${needsInvite() ? '' : 'hidden'}>
+      <label>🎟️ קוד הזמנה</label>
+      <input type="text" class="invinput" inputmode="numeric" autocomplete="off" placeholder="••••••" aria-label="קוד הזמנה">
+      <div class="inverr" role="alert" hidden></div>
+    </div>
+    <div class="start"><button class="cta">${label}</button>${extra}</div>
+  </form>`
+}
+
+function syncJoinForms () {
+  document.querySelectorAll('[data-join] .invfield').forEach(el => { el.hidden = !needsInvite() })
+}
+
+function bindJoinForms () {
+  document.querySelectorAll('[data-join]').forEach(form => {
+    const input = form.querySelector('.invinput')
+    const err = form.querySelector('.inverr')
+    const btn = form.querySelector('.cta')
+    const label = btn.textContent
+    const showErr = msg => { err.textContent = msg; err.hidden = false; input.classList.add('bad'); selectAll(input) }
+    input.addEventListener('input', () => { err.hidden = true; input.classList.remove('bad') })
+    input.addEventListener('focus', () => { if (input.classList.contains('bad')) selectAll(input) })
+    form.onsubmit = async e => {
+      e.preventDefault()
+      if (!needsInvite()) return go('/join')
+      const code = input.value.trim()
+      if (!code) return showErr('הזינו את קוד ההזמנה')
+      btn.disabled = true
+      btn.textContent = 'בודק…'
+      try {
+        await rpc('checkInvite', { invite: code })
+        verifiedInvite = code
+        go('/join?invite=' + encodeURIComponent(code))
+      } catch (e2) {
+        btn.disabled = false
+        btn.textContent = label
+        showErr(e2.message)
+      }
+    }
+  })
+}
+
 // ---------------- landing ----------------
 function landing () {
   const draw = () => {
@@ -153,13 +208,10 @@ function landing () {
     <div class="wrap">
       <section class="hero">
         <div>
-          ${serverPill()}
+          <div data-pill>${serverPill()}</div>
           <h1>אף הודעה<br>לא <em>נמחקת.</em></h1>
           <p class="sub">אל-מחיק שומר עותק של כל הודעה מהקבוצות והצ'אטים שתבחרו – ומספר לכם כשמישהו מחק או ערך משהו. 🕵️</p>
-          <div class="start">
-            <a class="cta" href="/join" data-link>הצטרפות בחינם ←</a>
-            <a class="btn" style="height:58px;padding:0 24px" href="/login" data-link>כבר רשומים? כניסה</a>
-          </div>
+          ${joinForm('הצטרפות בחינם ←', '<a class="btn" style="height:58px;padding:0 24px" href="/login" data-link>כבר רשומים? כניסה</a>')}
           <ul class="safe"><li>עובד בתוך הוואטסאפ שלכם</li><li>בלי להתקין כלום</li><li>מנתקים בלחיצה</li></ul>
         </div>
         <div class="phone" aria-hidden="true">
@@ -203,11 +255,16 @@ function landing () {
     </div></section>
     <section class="close wrap">
       <h2>מה שנכתב – נשאר. 🧽</h2>
-      <a class="cta" href="/join" data-link>בואו נתחיל</a>
+      <div class="narrow" style="margin:0 auto">${joinForm('בואו נתחיל')}</div>
     </section>`
   }
   draw()
-  const onServer = () => draw()
+  bindJoinForms()
+  // update in place, so a half-typed invite code is not wiped by a status refresh
+  const onServer = () => {
+    document.querySelectorAll('[data-pill]').forEach(el => { el.innerHTML = serverPill() })
+    syncJoinForms()
+  }
   document.addEventListener('server', onServer)
   cleanup = () => document.removeEventListener('server', onServer)
 }
@@ -256,11 +313,14 @@ async function join () {
 
   const askInvite = (error) => {
     const card = shell(`<h2>🎟️ יש לכם קוד הזמנה?</h2><p class="hint">ההצטרפות כרגע רק עם קוד הזמנה.</p>
-      ${error ? `<div class="err">${esc(error)}</div>` : ''}
-      <form id="f"><div class="field"><input class="big" id="inv" inputmode="numeric" autocomplete="off" placeholder="••••••" value="${esc(invite)}" required></div>
+      <form id="f"><div class="field"><input class="big ${error ? 'bad' : ''}" id="inv" inputmode="numeric" autocomplete="off" placeholder="••••••" value="${esc(invite)}" required>
+      <div class="inverr" role="alert" ${error ? '' : 'hidden'}>${esc(error || '')}</div></div>
       <button class="cta block">המשך</button></form>`)
-    card.querySelector('#f').onsubmit = e => { e.preventDefault(); verifyInvite(card.querySelector('#inv').value.trim()) }
-    card.querySelector('#inv').focus()
+    const inp = card.querySelector('#inv')
+    card.querySelector('#f').onsubmit = e => { e.preventDefault(); verifyInvite(inp.value.trim()) }
+    inp.addEventListener('input', () => { card.querySelector('.inverr').hidden = true; inp.classList.remove('bad') })
+    if (error) selectAll(inp)
+    else inp.focus()
   }
 
   // the invite code is checked before any pairing starts
@@ -365,6 +425,7 @@ async function join () {
   }
 
   if (st.regMode !== 'invite') chooseMethod()
+  else if (invite && invite === verifiedInvite) chooseMethod()
   else if (invite) verifyInvite(invite)
   else askInvite()
 }

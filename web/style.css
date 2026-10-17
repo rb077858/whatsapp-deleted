@@ -87,6 +87,16 @@ main { flex: 1 }
 .pill .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--green) }
 .pill.off .dot { background: #e0a800 }
 
+/* join form with invite code */
+.joinbox { display: flex; flex-direction: column; gap: 14px; width: 100% }
+.invfield { max-width: 380px }
+.close .invfield { margin: 0 auto; text-align: right }
+.close .joinbox .start { justify-content: center }
+.invinput { height: 58px !important; font-size: 22px !important; letter-spacing: .2em; text-align: center; font-family: var(--disp) !important; font-weight: 700 }
+input.bad { border-color: var(--danger) !important; background: var(--danger-soft) }
+.inverr { color: var(--danger); font-size: 15px; font-weight: 600; margin-top: 8px }
+.inverr::before { content: "✕ " }
+
 /* phone mockup */
 .phone {
   justify-self: center; width: min(100%, 340px); border-radius: 38px; padding: 12px;
