@@ -5,7 +5,7 @@ import { EventEmitter } from 'node:events'
 import pino from 'pino'
 import makeWASocket, {
   Browsers, DisconnectReason, useMultiFileAuthState, makeCacheableSignalKeyStore,
-  normalizeMessageContent, getContentType, downloadMediaMessage, jidDecode, proto
+  normalizeMessageContent, getContentType, downloadMediaMessage, jidDecode, proto, getBinaryNodeChild
 } from 'baileys'
 import { SESSIONS_DIR, TMP_DIR, BOT_NAME, BACKUP_SUFFIX } from './config.js'
 import { users, backups, msgmap, contacts } from './db.js'
@@ -96,6 +96,7 @@ export class Bot extends EventEmitter {
       if (!this.controlChecked) {
         this.controlChecked = true
         this.ensureControlGroup().catch(e => this.log('control group error', e.message))
+        this.lockExistingBackups().catch(e => this.log('lock backups error', e.message))
       }
     }
     if (connection === 'close') {
@@ -348,6 +349,72 @@ export class Bot extends EventEmitter {
     }
   }
 
+  // ---------- backup group permissions & members ----------
+  /** Only admins (the user) may send, edit the group info, or add members. */
+  async lockGroup (jid) {
+    for (const [fn, arg] of [['groupSettingUpdate', 'announcement'], ['groupSettingUpdate', 'locked'], ['groupMemberAddMode', 'admin_add']]) {
+      await this.sock[fn](jid, arg).catch(e => this.log(`${fn}(${arg}) failed:`, e.message))
+    }
+  }
+
+  /** One-time: lock backup groups created before groups were locked automatically. */
+  async lockExistingBackups () {
+    const u = this.user
+    if (u.settings.groupsLocked) return
+    for (const b of backups.list(this.userId)) await this.lockGroup(b.backup_jid)
+    users.update(this.userId, { settings: { ...this.user.settings, groupsLocked: true } })
+  }
+
+  /**
+   * Adds a phone number to a backup group. When the person's privacy settings
+   * don't allow being added, WhatsApp hands back a personal invite, which is sent to them.
+   * Returns 'added' | 'invited' | 'already'.
+   */
+  async addToGroup (b, phone) {
+    if (!this.sock || this.status !== 'open') throw new Error('הוואטסאפ לא מחובר כרגע')
+    const [found] = await this.sock.onWhatsApp(phone + '@s.whatsapp.net').catch(() => [])
+    if (!found?.exists) throw new Error('המספר הזה לא רשום בוואטסאפ')
+    const [res] = await this.sock.groupParticipantsUpdate(b.backup_jid, [found.jid], 'add')
+    const status = String(res?.status || '')
+    if (status === '200') return 'added'
+    if (status === '409') return 'already'
+    if (status === '403') {
+      const req = getBinaryNodeChild(res.content, 'add_request')
+      if (!req?.attrs?.code) throw new Error('לא ניתן להוסיף את המספר הזה')
+      const subject = (this.groupCache.get(b.backup_jid)?.subject) || `${b.source_name}${BACKUP_SUFFIX}`
+      // relayed directly (not sendMessage) so no group-picture lookup is needed
+      const msg = proto.Message.fromObject({
+        groupInviteMessage: {
+          groupJid: b.backup_jid,
+          inviteCode: req.attrs.code,
+          inviteExpiration: Number(req.attrs.expiration) || Math.floor(Date.now() / 1000) + 3 * 86400,
+          groupName: subject,
+          caption: `הוזמנת לקבוצת הגיבוי "${subject}" 🧽`
+        }
+      })
+      await this.enqueue(() => this.sock.relayMessage(found.jid, msg, {}))
+      return 'invited'
+    }
+    throw new Error(status === '408' ? 'המספר יצא מהקבוצה לאחרונה, נסו שוב מאוחר יותר' : `וואטסאפ דחה את הבקשה (${status})`)
+  }
+
+  async groupMembers (b) {
+    const meta = await this.sock.groupMetadata(b.backup_jid)
+    this.groupCache.set(meta.id, meta)
+    const me = phoneOf(this.user.jid?.replace(/:\d+@/, '@'))
+    return meta.participants.map(p => {
+      const pnJid = [p.phoneNumber, p.id, p.jid].find(j => j?.endsWith('@s.whatsapp.net'))
+      const phone = phoneOf(pnJid) || null
+      const c = contacts.get(this.userId, pnJid || p.id)
+      return { id: p.id, phone, name: c?.name || c?.notify || null, admin: !!p.admin, me: !!phone && phone === me }
+    })
+  }
+
+  async removeFromGroup (b, participantId) {
+    const [res] = await this.sock.groupParticipantsUpdate(b.backup_jid, [participantId], 'remove')
+    if (String(res?.status) !== '200') throw new Error('לא הצלחתי להסיר')
+  }
+
   // ---------- searching & creating backups ----------
   async allGroups () {
     if (this.groupsList && Date.now() - this.groupsList.at < 120000) return this.groupsList.list
@@ -403,7 +470,7 @@ export class Bot extends EventEmitter {
     const b = backups.add(this.userId, { source_jid: jid, source_alt: alt, source_name: name, kind, backup_jid: meta.id })
     this.groupsList = null
     await this.sock.groupUpdateDescription(meta.id, `גיבוי אוטומטי של "${name}" ע"י ${BOT_NAME}`).catch(() => {})
-    if (this.user.settings.muteBackups) await this.sock.chatModify({ mute: -1 }, meta.id).catch(e => this.log('mute failed:', e.message))
+    await this.lockGroup(meta.id)
     await this.enqueue(() => this.send(meta.id, { text: T.backupIntro(name, kind) }))
     this.log('backup created for', kind, name)
     return b

@@ -5,6 +5,7 @@ import { initializeApp, cert, deleteApp } from 'firebase-admin/app'
 import { getFirestore, FieldValue } from 'firebase-admin/firestore'
 import { SERVICE_ACCOUNT_FILE } from './config.js'
 import { handlers, ApiError, publicStatus } from './api.js'
+import { ShareError } from './sharing.js'
 import { startJoin, cancelJoin } from './manager.js'
 import { sessions, msgmap } from './db.js'
 
@@ -51,8 +52,8 @@ async function handleRpc (doc) {
     const result = await fn({ ...(args || {}), token: doc.get('token') || args?.token })
     await ref.update({ status: 'done', result: JSON.parse(JSON.stringify(result ?? {})), token: FieldValue.delete() })
   } catch (e) {
-    if (!(e instanceof ApiError)) console.log(`[rpc] ${op} failed:`, e.message)
-    await ref.update({ status: 'error', error: e instanceof ApiError ? e.message : 'שגיאה בשרת, נסו שוב.', token: FieldValue.delete() }).catch(() => {})
+    if (!(e instanceof ApiError || e instanceof ShareError)) console.log(`[rpc] ${op} failed:`, e.message)
+    await ref.update({ status: 'error', error: (e instanceof ApiError || e instanceof ShareError) ? e.message : 'שגיאה בשרת, נסו שוב.', token: FieldValue.delete() }).catch(() => {})
   }
 }
 

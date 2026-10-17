@@ -1,4 +1,5 @@
 import { backups, users } from './db.js'
+import { decideRequest } from './sharing.js'
 import * as T from './text.js'
 
 const clean = s => String(s || '').replace(/[\u{1F300}-\u{1FAFF}\u{2600}-\u{27BF}\u{FE0F}*_~]/gu, '').trim()
@@ -47,6 +48,9 @@ export class Commands {
     if (is(t, 'ממשק', 'אתר', 'קישור', 'site')) return this.reply(T.siteLink())
     if (is(t, 'השהה', 'עצור', 'pause')) return this.setPaused(true)
     if (is(t, 'המשך', 'pause off', 'resume')) return this.setPaused(false)
+
+    const dec = t.match(/^(אשר|אישור|דחה|דחייה)\s+(\d+)$/)
+    if (dec) return this.decide(Number(dec[2]), dec[1].startsWith('א'))
 
     const rm = t.match(/^(הסר|מחק|הפסק)\s+(.+)$/)
     if (rm) return this.remove(rm[2])
@@ -109,6 +113,17 @@ export class Commands {
     if (!nums) return this.reply('כדי להסיר, שלחו *הסר* ומספר מתוך *רשימה*, למשל *הסר 1*.')
     for (const i of nums) backups.remove(this.bot.userId, list[i].id)
     return this.reply(`➖ הגיבוי הופסק עבור: ${nums.map(i => list[i].source_name).join(', ')}\n_קבוצת ה(הודעות) נשארת אצלכם עם כל מה שנשמר בה._`)
+  }
+
+  async decide (id, approve) {
+    try {
+      const { status, request } = await decideRequest(this.bot.userId, id, approve)
+      const who = request.name || request.phone
+      if (!approve) return this.reply(`🚫 הבקשה של ${who} נדחתה.`)
+      return this.reply(status === 'invited' ? `📩 ${who} קיבל/ה הזמנה אישית לקבוצה (הפרטיות שלו/ה לא מאפשרת צירוף ישיר).` : status === 'already' ? `👌 ${who} כבר בקבוצה.` : `✅ ${who} צורף/ה לקבוצה.`)
+    } catch (e) {
+      return this.reply(`⚠️ ${e.message}`)
+    }
   }
 
   setPaused (paused) {
