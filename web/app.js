@@ -1,5 +1,4 @@
 import { initializeApp } from 'https://www.gstatic.com/firebasejs/12.6.0/firebase-app.js'
-import { getAuth, signInAnonymously, onAuthStateChanged } from 'https://www.gstatic.com/firebasejs/12.6.0/firebase-auth.js'
 import { getFirestore, collection, addDoc, doc, onSnapshot, serverTimestamp, updateDoc } from 'https://www.gstatic.com/firebasejs/12.6.0/firebase-firestore.js'
 
 // ---------------- helpers ----------------
@@ -50,19 +49,14 @@ function confirmBox (title, text, okLabel = 'אישור', danger = false) {
 }
 
 // ---------------- firebase relay ----------------
-let db, auth, uid
+// No sign-in: every request is a document with a random, unguessable id that only its creator knows.
+// `uid` is a per-browser id the server uses for rate limiting.
+let db
+const uid = store.get('cid') || (() => { const id = crypto.randomUUID(); store.set('cid', id); return id })()
 const ready = (async () => {
   const cfg = await fetch('/__/firebase/init.json').then(r => (r.ok ? r.json() : null)).catch(() => null)
   if (!cfg) throw new Error('NOCONFIG')
-  const app = initializeApp(cfg)
-  auth = getAuth(app)
-  db = getFirestore(app)
-  uid = await new Promise((resolve, reject) => {
-    const off = onAuthStateChanged(auth, u => {
-      if (u) { off(); resolve(u.uid) }
-    })
-    signInAnonymously(auth).catch(reject)
-  })
+  db = getFirestore(initializeApp(cfg))
 })()
 
 const server = { online: null, status: {} }

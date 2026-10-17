@@ -20,7 +20,6 @@
 ## הקמה (פעם אחת)
 1. **פרויקט Firebase חדש** (מומלץ פרויקט נפרד מזה של Run on Phone, כדי שה-rules לא ידרסו זה את זה):
    - Build ← **Firestore Database** ← Create
-   - Build ← **Authentication** ← Sign-in method ← להפעיל **Anonymous**
 2. **פריסת האתר והחוקים** מהמחשב:
    ```
    npm i -g firebase-tools

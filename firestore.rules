@@ -1,13 +1,12 @@
 rules_version = '2';
 // The bot (on the phone) uses a service account and bypasses these rules.
-// Visitors sign in anonymously and may only create requests and read their own.
+// Visitors don't sign in: each request is a document with a random id that only its creator knows.
+// Documents can be read one at a time by id, never listed.
 service cloud.firestore {
   match /databases/{database}/documents {
-    function signedIn() { return request.auth != null; }
-    function mine() { return signedIn() && resource.data.uid == request.auth.uid; }
     function newRequest(keys) {
-      return signedIn()
-        && request.resource.data.uid == request.auth.uid
+      return request.resource.data.uid is string
+        && request.resource.data.uid.size() <= 64
         && request.resource.data.status == 'pending'
         && request.resource.data.createdAt == request.time
         && request.resource.data.keys().hasOnly(keys);
@@ -16,15 +15,14 @@ service cloud.firestore {
     match /rpc/{id} {
       allow create: if newRequest(['uid', 'status', 'op', 'args', 'token', 'createdAt'])
         && request.resource.data.op is string && request.resource.data.args is map;
-      allow get: if mine();
+      allow get: if true;
     }
 
     match /joins/{id} {
       allow create: if newRequest(['uid', 'status', 'method', 'phone', 'invite', 'createdAt']);
-      allow get: if mine();
+      allow get: if true;
       // the page may cancel its own pairing when the visitor leaves
-      allow update: if mine()
-        && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['status'])
+      allow update: if request.resource.data.diff(resource.data).affectedKeys().hasOnly(['status'])
         && request.resource.data.status == 'cancel';
     }
 
