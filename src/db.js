@@ -55,6 +55,31 @@ CREATE TABLE IF NOT EXISTS web_sessions (
   role TEXT NOT NULL DEFAULT 'user',
   expires INTEGER NOT NULL
 );
+CREATE TABLE IF NOT EXISTS links (
+  id TEXT PRIMARY KEY,
+  user_id TEXT NOT NULL,
+  backup_id INTEGER NOT NULL,
+  label TEXT,
+  max_uses INTEGER NOT NULL DEFAULT 0,
+  uses INTEGER NOT NULL DEFAULT 0,
+  expires INTEGER,
+  who TEXT NOT NULL DEFAULT 'anyone',
+  allowed TEXT,
+  approval INTEGER NOT NULL DEFAULT 0,
+  active INTEGER NOT NULL DEFAULT 1,
+  created_at INTEGER NOT NULL
+);
+CREATE TABLE IF NOT EXISTS join_requests (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  link_id TEXT NOT NULL,
+  user_id TEXT NOT NULL,
+  backup_id INTEGER NOT NULL,
+  phone TEXT NOT NULL,
+  name TEXT,
+  status TEXT NOT NULL DEFAULT 'pending',
+  created_at INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS join_requests_user ON join_requests (user_id, status);
 CREATE TABLE IF NOT EXISTS login_codes (
   phone TEXT PRIMARY KEY,
   code_hash TEXT NOT NULL,
@@ -120,7 +145,7 @@ export const users = {
     db.prepare(`UPDATE users SET ${keys.map(k => `${k} = ?`).join(', ')} WHERE id = ?`).run(...vals, id)
   },
   remove (id) {
-    for (const t of ['backups', 'msgmap', 'contacts', 'web_sessions']) db.prepare(`DELETE FROM ${t} WHERE user_id = ?`).run(id)
+    for (const t of ['backups', 'msgmap', 'contacts', 'web_sessions', 'links', 'join_requests']) db.prepare(`DELETE FROM ${t} WHERE user_id = ?`).run(id)
     db.prepare('DELETE FROM users WHERE id = ?').run(id)
   }
 }
@@ -141,6 +166,41 @@ export const backups = {
   remove: (userId, id) => db.prepare('DELETE FROM backups WHERE user_id = ? AND id = ?').run(userId, id),
   bump: id => db.prepare('UPDATE backups SET count = count + 1 WHERE id = ?').run(id),
   totals: () => db.prepare('SELECT COUNT(*) AS chats, COALESCE(SUM(count), 0) AS messages FROM backups').get()
+}
+
+// ---------- join links & requests ----------
+const LINK_ALPHABET = 'abcdefghijkmnpqrstuvwxyzABCDEFGHJKLMNPQRSTUVWXYZ23456789'
+export const links = {
+  create (userId, backupId, l) {
+    let id
+    do id = Array.from(crypto.randomBytes(10), b => LINK_ALPHABET[b % LINK_ALPHABET.length]).join('')
+    while (links.get(id))
+    db.prepare(`INSERT INTO links (id, user_id, backup_id, label, max_uses, expires, who, allowed, approval, created_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`).run(id, userId, backupId, l.label || null, l.max_uses || 0, l.expires || null, l.who || 'anyone', l.allowed || null, l.approval ? 1 : 0, now())
+    return links.get(id)
+  },
+  get: id => db.prepare('SELECT * FROM links WHERE id = ?').get(id),
+  forBackup: (userId, backupId) => db.prepare('SELECT * FROM links WHERE user_id = ? AND backup_id = ? ORDER BY created_at DESC').all(userId, backupId),
+  update (userId, id, fields) {
+    const keys = Object.keys(fields)
+    if (!keys.length) return
+    db.prepare(`UPDATE links SET ${keys.map(k => `${k} = ?`).join(', ')} WHERE user_id = ? AND id = ?`).run(...keys.map(k => fields[k]), userId, id)
+  },
+  use: id => db.prepare('UPDATE links SET uses = uses + 1 WHERE id = ?').run(id),
+  remove: (userId, id) => db.prepare('DELETE FROM links WHERE user_id = ? AND id = ?').run(userId, id),
+  removeForBackup: (userId, backupId) => db.prepare('DELETE FROM links WHERE user_id = ? AND backup_id = ?').run(userId, backupId)
+}
+
+export const joinRequests = {
+  add (r) {
+    const res = db.prepare('INSERT INTO join_requests (link_id, user_id, backup_id, phone, name, created_at) VALUES (?, ?, ?, ?, ?, ?)')
+      .run(r.link_id, r.user_id, r.backup_id, r.phone, r.name || null, now())
+    return joinRequests.get(r.user_id, Number(res.lastInsertRowid))
+  },
+  get: (userId, id) => db.prepare('SELECT * FROM join_requests WHERE user_id = ? AND id = ?').get(userId, id),
+  pending: userId => db.prepare("SELECT * FROM join_requests WHERE user_id = ? AND status = 'pending' ORDER BY created_at").all(userId),
+  pendingFor: (linkId, phone) => db.prepare("SELECT * FROM join_requests WHERE link_id = ? AND phone = ? AND status = 'pending'").get(linkId, phone),
+  setStatus: (userId, id, status) => db.prepare('UPDATE join_requests SET status = ? WHERE user_id = ? AND id = ?').run(status, userId, id)
 }
 
 // ---------- message map (original -> backup copy), for delete/edit alerts and quotes ----------

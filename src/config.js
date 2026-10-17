@@ -23,7 +23,6 @@ export const DEFAULT_USER_SETTINGS = {
   types: { text: true, image: true, video: true, audio: true, document: true, sticker: true, location: true, contact: true },
   alertDeleted: true,
   alertEdited: true,
-  muteBackups: true,
   includeOwn: true,
   paused: false,
   maxMediaMB: 50

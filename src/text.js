@@ -19,6 +19,7 @@ export const menu = () => `*📖 תפריט*
 ➖ *הסר 2* – הפסקת גיבוי של מספר 2 ברשימה
 ⚙️ *הגדרות* – מה לגבות ואיך
 ⏸️ *השהה* / ▶️ *המשך* – עצירת הגיבוי זמנית
+✅ *אשר 5* / 🚫 *דחה 5* – טיפול בבקשת הצטרפות לקבוצת גיבוי
 💻 *ממשק* – קישור לניהול בממשק הגרפי
 ❓ *תפריט* – ההודעה הזו`
 
@@ -40,7 +41,6 @@ export const settingsItems = s => [
   ...Object.keys(TYPE_LABELS).map(k => ({ label: TYPE_LABELS[k], get: () => s.types[k], toggle: () => { s.types[k] = !s.types[k] } })),
   { label: 'התראה כשמישהו מוחק הודעה', get: () => s.alertDeleted, toggle: () => { s.alertDeleted = !s.alertDeleted } },
   { label: 'התראה כשמישהו עורך הודעה', get: () => s.alertEdited, toggle: () => { s.alertEdited = !s.alertEdited } },
-  { label: 'להשתיק קבוצות גיבוי חדשות', get: () => s.muteBackups, toggle: () => { s.muteBackups = !s.muteBackups } },
   { label: 'לגבות גם את ההודעות שלי', get: () => s.includeOwn, toggle: () => { s.includeOwn = !s.includeOwn } }
 ]
 

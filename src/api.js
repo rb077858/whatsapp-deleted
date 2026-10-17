@@ -1,10 +1,12 @@
-import { users, backups, sessions, loginCodes, kvGet, kvSet, normalizePhone, randomCode, sha, checkPassword, hashPassword } from './db.js'
+import { links, joinRequests, users, backups, sessions, loginCodes, kvGet, kvSet, normalizePhone, randomCode, sha, checkPassword, hashPassword } from './db.js'
 import { bots, startBot, stopBot, registrationError } from './manager.js'
 import { mergeSettings, BOT_NAME, TYPE_LABELS } from './config.js'
 import * as T from './text.js'
+import { publicLinkInfo, joinByLink, decideRequest, linkView, linkFields } from './sharing.js'
 
 export class ApiError extends Error {}
 const inviteFailures = []
+const linkTries = new Map()
 const fail = msg => { throw new ApiError(msg) }
 
 function requireUser (token) {
@@ -39,6 +41,7 @@ export function publicStatus () {
   const mode = kvGet('regMode')
   return {
     botName: BOT_NAME,
+    siteUrl: process.env.SITE_URL || null,
     regMode: mode,
     full: mode === 'closed' || (mode === 'limit' && users.count() >= kvGet('regLimit')),
     typeLabels: TYPE_LABELS
@@ -94,7 +97,13 @@ export const handlers = {
   // ---------- dashboard ----------
   async me ({ token }) {
     const user = requireUser(token)
-    return { user: publicUser(user), backups: backups.list(user.id).map(b => ({ id: b.id, name: b.source_name, kind: b.kind, active: !!b.active, count: b.count, createdAt: b.created_at })) }
+    const list = backups.list(user.id)
+    const names = Object.fromEntries(list.map(b => [b.id, b.source_name]))
+    return {
+      user: publicUser(user),
+      backups: list.map(b => ({ id: b.id, name: b.source_name, kind: b.kind, active: !!b.active, count: b.count, createdAt: b.created_at, links: links.forBackup(user.id, b.id).filter(l => l.active).length })),
+      requests: joinRequests.pending(user.id).map(r => ({ id: r.id, phone: r.phone, name: r.name, group: names[r.backup_id] || '', createdAt: r.created_at }))
+    }
   },
 
   async searchChats ({ token, query }) {
@@ -130,7 +139,75 @@ export const handlers = {
   async removeBackup ({ token, id }) {
     const user = requireUser(token)
     backups.remove(user.id, Number(id))
+    links.removeForBackup(user.id, Number(id))
     return {}
+  },
+
+  // ---------- sharing a backup group ----------
+  async groupMembers ({ token, id }) {
+    const user = requireUser(token)
+    const b = backups.get(user.id, Number(id)) || fail('הקבוצה לא נמצאה.')
+    return { members: await requireBot(user).groupMembers(b) }
+  },
+
+  async addMember ({ token, id, phone }) {
+    const user = requireUser(token)
+    const b = backups.get(user.id, Number(id)) || fail('הקבוצה לא נמצאה.')
+    const pn = normalizePhone(phone) || fail('מספר הטלפון לא תקין.')
+    const bot = requireBot(user)
+    try {
+      return { status: await bot.addToGroup(b, pn) }
+    } catch (e) { fail(e.message) }
+  },
+
+  async removeMember ({ token, id, participant }) {
+    const user = requireUser(token)
+    const b = backups.get(user.id, Number(id)) || fail('הקבוצה לא נמצאה.')
+    const bot = requireBot(user)
+    try { await bot.removeFromGroup(b, String(participant)) } catch (e) { fail(e.message) }
+    return {}
+  },
+
+  async listLinks ({ token, id }) {
+    const user = requireUser(token)
+    return { links: links.forBackup(user.id, Number(id)).map(linkView) }
+  },
+
+  async createLink ({ token, id, options }) {
+    const user = requireUser(token)
+    const b = backups.get(user.id, Number(id)) || fail('הקבוצה לא נמצאה.')
+    if (links.forBackup(user.id, b.id).length >= 20) fail('אפשר עד 20 קישורים לקבוצה.')
+    return { link: linkView(links.create(user.id, b.id, linkFields({ who: 'anyone', ...options }))) }
+  },
+
+  async updateLink ({ token, linkId, options }) {
+    const user = requireUser(token)
+    const l = links.get(String(linkId))
+    if (!l || l.user_id !== user.id) fail('הקישור לא נמצא.')
+    links.update(user.id, l.id, linkFields(options))
+    return { link: linkView(links.get(l.id)) }
+  },
+
+  async deleteLink ({ token, linkId }) {
+    const user = requireUser(token)
+    links.remove(user.id, String(linkId))
+    return {}
+  },
+
+  async decideRequest ({ token, requestId, approve }) {
+    const user = requireUser(token)
+    return { status: (await decideRequest(user.id, requestId, !!approve)).status }
+  },
+
+  // public join-link page (no login)
+  linkInfo ({ link }) { return publicLinkInfo(link) },
+
+  async linkJoin ({ link, phone, name }) {
+    const t = Date.now()
+    const tries = (linkTries.get(link) || []).filter(x => x > t - 10 * 60000)
+    if (tries.length >= 20) fail('יותר מדי ניסיונות בקישור הזה. נסו שוב בעוד כמה דקות.')
+    linkTries.set(link, [...tries, t])
+    return joinByLink(link, phone, name)
   },
 
   async saveSettings ({ token, settings }) {
@@ -138,7 +215,7 @@ export const handlers = {
     const s = mergeSettings(user.settings)
     const inc = settings || {}
     for (const k of Object.keys(s.types)) if (typeof inc.types?.[k] === 'boolean') s.types[k] = inc.types[k]
-    for (const k of ['alertDeleted', 'alertEdited', 'muteBackups', 'includeOwn', 'paused']) if (typeof inc[k] === 'boolean') s[k] = inc[k]
+    for (const k of ['alertDeleted', 'alertEdited', 'includeOwn', 'paused']) if (typeof inc[k] === 'boolean') s[k] = inc[k]
     if (Number.isFinite(inc.maxMediaMB)) s.maxMediaMB = Math.max(1, Math.min(100, Math.round(inc.maxMediaMB)))
     users.update(user.id, { settings: s })
     return { settings: s }

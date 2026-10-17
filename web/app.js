@@ -115,7 +115,9 @@ window.addEventListener('popstate', () => render())
 
 function nav () {
   const logged = !!store.get('token')
-  $nav.innerHTML = location.pathname.startsWith('/admin')
+  $nav.innerHTML = location.pathname.startsWith('/j/')
+    ? ''
+    : location.pathname.startsWith('/admin')
     ? '<a class="navlink" href="/" data-link>לאתר</a>'
     : logged
       ? '<a class="navlink" href="/app" data-link>הניהול שלי</a>'
@@ -129,7 +131,9 @@ function render () {
   cleanup = null
   nav()
   window.scrollTo(0, 0)
-  const page = routes[location.pathname.replace(/\/+$/, '') || '/'] || landing
+  const path = location.pathname.replace(/\/+$/, '') || '/'
+  const jm = path.match(/^\/j\/([A-Za-z0-9]{6,20})$/)
+  const page = jm ? () => linkPage(jm[1]) : routes[path] || landing
   Promise.resolve(page()).catch(err => {
     if (err?.message === 'NOCONFIG') {
       $app.innerHTML = `<div class="wrap narrow page"><h1>כמעט שם 🛠️</h1><p class="lead">השירות עוד לא הוגדר. מנהל השירות צריך להעלות את הגדרות Firebase בעמוד ההגדרה באפליקציה.</p></div>`
@@ -241,7 +245,8 @@ function landing () {
         <div class="feature"><div class="ico">🗑️</div><h3>התראה על מחיקה</h3><p>מישהו מחק? תקבלו תגובה על העותק המקורי, עם השם שלו.</p></div>
         <div class="feature"><div class="ico">✏️</div><h3>התראה על עריכה</h3><p>רואים גם את הגרסה המקורית וגם את מה שנערך.</p></div>
         <div class="feature"><div class="ico">📸</div><h3>כל סוגי ההודעות</h3><p>טקסט, תמונות, סרטונים, הקלטות, מסמכים, סטיקרים ומיקומים – אתם בוחרים.</p></div>
-        <div class="feature"><div class="ico">🔕</div><h3>בלי רעש</h3><p>קבוצות הגיבוי מושתקות כברירת מחדל, כך שלא תקבלו התראות כפולות.</p></div>
+        <div class="feature"><div class="ico">🛡️</div><h3>קבוצה נעולה</h3><p>רק אתם כותבים בקבוצות הגיבוי, ואף אחד לא יכול לשנות שם, תיאור או תמונה.</p></div>
+        <div class="feature"><div class="ico">🔗</div><h3>שיתוף חכם</h3><p>צרפו אחרים לקריאה בלבד – לפי מספר, או בקישור עם הגבלות ואישור שלכם.</p></div>
         <div class="feature"><div class="ico">💬</div><h3>ניהול מהוואטסאפ</h3><p>הכל עובד בהודעות בקבוצת הבוט – או כאן בממשק, מה שנוח לכם.</p></div>
         <div class="feature"><div class="ico">🔒</div><h3>רק אצלכם</h3><p>קבוצות הגיבוי פרטיות, ורק אתם בהן.</p></div>
       </div>
@@ -510,15 +515,26 @@ async function dashboard () {
         <div class="stat"><b>${data.backups.filter(b => b.active).length}</b><span>פעילים</span></div>
       </div>
 
+      ${data.requests?.length ? `<div class="card reqcard">
+        <div class="card-head"><h2>🙋 בקשות הצטרפות <span class="badge">${data.requests.length}</span></h2></div>
+        <div class="list">${data.requests.map(r => `<div class="item wide">
+          <div class="ico initial">${esc((r.name || '#').trim()[0])}</div>
+          <div class="txt"><div class="name">${esc(r.name || fmtPhone(r.phone))}</div><div class="meta">${r.name ? `<span class="ltr">${esc(fmtPhone(r.phone))}</span> · ` : ''}ל-${esc(r.group)} (הודעות)</div></div>
+          <div class="acts"><button class="btn small ok-btn" data-req="${r.id}" data-ok="1">✓ אישור</button>
+          <button class="btn small danger" data-req="${r.id}" data-ok="0" title="דחייה">✕</button></div>
+        </div>`).join('')}</div>
+      </div>` : ''}
+
       <div class="card">
         <div class="card-head"><div><h2>מה מגובה</h2><p class="muted">לכל צ'אט יש קבוצת "(הודעות)" משלו בוואטסאפ</p></div><button class="cta" style="height:46px;padding:0 20px;font-size:16px" id="add">+ הוספה</button></div>
         <div class="list">
           ${data.backups.length
-            ? data.backups.map(b => `<div class="item">
+            ? data.backups.map(b => `<div class="item wide">
                 <div class="ico">${b.kind === 'group' ? '👥' : '👤'}</div>
                 <div class="txt"><div class="name">${esc(b.name)}</div><div class="meta">${fmtNum(b.count)} הודעות${b.active ? '' : ' · מושהה'}</div></div>
+                <div class="acts"><button class="btn small share-btn" data-share="${b.id}" title="צירוף אנשים">👥 צירוף${b.links ? `<span class="dotbadge">${b.links}</span>` : ''}</button>
                 <span class="switch" title="פעיל"><input type="checkbox" data-active="${b.id}" ${b.active ? 'checked' : ''}><span></span></span>
-                <button class="btn small danger" data-remove="${b.id}" title="הסרה">✕</button>
+                <button class="btn small danger" data-remove="${b.id}" title="הסרה">✕</button></div>
               </div>`).join('')
             : '<div class="empty"><div class="e">📭</div>עוד לא בחרתם מה לגבות.<br>לחצו "+ הוספה" כדי להתחיל.</div>'}
         </div>
@@ -533,7 +549,6 @@ async function dashboard () {
         <h2>הגדרות</h2>
         ${sw('alertDeleted', '🗑️ התראה כשמישהו מוחק הודעה', 'תגובה על העותק עם שם המוחק', settings.alertDeleted)}
         ${sw('alertEdited', '✏️ התראה כשמישהו עורך הודעה', 'כולל הנוסח החדש', settings.alertEdited)}
-        ${sw('muteBackups', '🔕 להשתיק קבוצות גיבוי חדשות', 'כדי לא לקבל כל הודעה פעמיים', settings.muteBackups)}
         ${sw('includeOwn', '🙋 לגבות גם את ההודעות שלי', '', settings.includeOwn)}
         ${sw('paused', '⏸️ השהיית כל הגיבוי', 'עוצר זמנית את ההעתקה', settings.paused)}
         <label class="toggle" style="cursor:default"><span class="t">📦 גודל קובץ מקסימלי<small>קבצים גדולים יותר יירשמו בלי הקובץ</small></span>
@@ -549,6 +564,16 @@ async function dashboard () {
     document.getElementById('add').onclick = openAdd
     $app.querySelectorAll('[data-active]').forEach(el => { el.onchange = async () => {
       try { await userRpc('setBackupActive', { id: el.dataset.active, active: el.checked }); data.backups.find(b => b.id == el.dataset.active).active = el.checked; draw(); toast(el.checked ? '▶️ הגיבוי פעיל' : '⏸️ הגיבוי הושהה') } catch (e) { toast(e.message); el.checked = !el.checked }
+    } })
+    $app.querySelectorAll('[data-share]').forEach(el => { el.onclick = () => openShare(data.backups.find(b => b.id == el.dataset.share), refresh) })
+    $app.querySelectorAll('[data-req]').forEach(el => { el.onclick = async () => {
+      const ok = el.dataset.ok === '1'
+      el.disabled = true
+      try {
+        const r = await userRpc('decideRequest', { requestId: el.dataset.req, approve: ok })
+        toast(!ok ? 'הבקשה נדחתה' : r.status === 'invited' ? '📩 נשלחה הזמנה אישית' : r.status === 'already' ? 'כבר בקבוצה' : '✅ צורף לקבוצה')
+        refresh()
+      } catch (e) { toast(e.message); el.disabled = false }
     } })
     $app.querySelectorAll('[data-remove]').forEach(el => { el.onclick = async () => {
       const b = data.backups.find(x => x.id == el.dataset.remove)
@@ -630,6 +655,212 @@ async function dashboard () {
   draw()
 }
 
+// ---------------- sharing a backup group ----------------
+const siteBase = () => server.status?.siteUrl || location.origin
+const linkUrl = id => `${siteBase()}/j/${id}`
+const ADD_RESULT = {
+  added: ['✅', 'צורף/ה לקבוצה', 'יוכל/תוכל לקרוא את כל ההודעות מעכשיו.'],
+  invited: ['📩', 'נשלחה הזמנה אישית', 'ההגדרות של המספר לא מאפשרות צירוף ישיר, אז שלחנו לו/ה הזמנה בוואטסאפ.'],
+  already: ['👌', 'כבר בקבוצה', 'המספר הזה כבר חבר בקבוצה.']
+}
+const EXPIRY = [['0', 'ללא'], ['1', 'יום'], ['7', 'שבוע'], ['30', 'חודש']]
+const WHO = [['anyone', 'כולם'], ['contacts', 'אנשי הקשר שלי'], ['list', 'רשימת מספרים']]
+
+function openShare (b, onChange) {
+  let tab = 'add'
+  let changed = false
+  modal(`<div class="share-head">
+      <div class="gicon">${b.kind === 'group' ? '👥' : '👤'}<span class="lock">🔒</span></div>
+      <div class="txt"><h2>${esc(b.name)} (הודעות)</h2><p class="muted">רק אתם כותבים · כל מי שמצורף רק קורא</p></div>
+      <button class="btn small" data-close>✕</button>
+    </div>
+    <div class="tabs" id="stabs"><button data-t="add">➕ הוספה</button><button data-t="links">🔗 קישורים</button><button data-t="members">👥 חברים</button></div>
+    <div id="pane"></div>`, (sheet, close) => {
+    const pane = sheet.querySelector('#pane')
+    sheet.parentElement.addEventListener('click', e => { if ((e.target === sheet.parentElement || e.target.closest('[data-close]')) && changed) onChange() })
+    const setTab = t => {
+      tab = t
+      sheet.querySelectorAll('#stabs button').forEach(x => x.classList.toggle('on', x.dataset.t === t))
+      ;({ add: paneAdd, links: paneLinks, members: paneMembers })[t]()
+    }
+    sheet.querySelectorAll('#stabs button').forEach(x => { x.onclick = () => setTab(x.dataset.t) })
+
+    function paneAdd (result) {
+      pane.innerHTML = `<p class="hint">מזינים מספר והוא מצטרף לקבוצה לקריאה בלבד. אם הגדרות הפרטיות שלו לא מאפשרות צירוף – הוא יקבל הזמנה אישית בוואטסאפ.</p>
+        <form id="af" class="addrow"><input type="tel" id="aph" inputmode="tel" autocomplete="off" placeholder="050-1234567" required><button class="cta" id="abtn">הוספה</button></form>
+        <div id="ares">${result || ''}</div>`
+      const input = pane.querySelector('#aph')
+      input.focus()
+      pane.querySelector('#af').onsubmit = async e => {
+        e.preventDefault()
+        const btn = pane.querySelector('#abtn')
+        btn.disabled = true
+        btn.textContent = '…'
+        const out = pane.querySelector('#ares')
+        try {
+          const r = await userRpc('addMember', { id: b.id, phone: input.value })
+          const [ico, title, text] = ADD_RESULT[r.status] || ADD_RESULT.added
+          out.innerHTML = `<div class="result ok"><span class="rico">${ico}</span><div><b>${esc(fmtPhone(String(input.value).replace(/\D/g, '').replace(/^0/, '972')))} – ${title}</b><p>${text}</p></div></div>`
+          changed = true
+          input.value = ''
+          input.focus()
+        } catch (err) {
+          out.innerHTML = `<div class="result bad"><span class="rico">⚠️</span><div><b>לא הצלחתי להוסיף</b><p>${esc(err.message)}</p></div></div>`
+          selectAll(input)
+        }
+        btn.disabled = false
+        btn.textContent = 'הוספה'
+      }
+    }
+
+    async function paneLinks () {
+      pane.innerHTML = '<div class="center" style="padding:30px"><div class="spinner"></div></div>'
+      let list
+      try { list = (await userRpc('listLinks', { id: b.id })).links } catch (e) { pane.innerHTML = `<div class="err">${esc(e.message)}</div>`; return }
+      if (tab !== 'links') return
+      const chips = l => [
+        `<span class="mini">👥 ${l.uses}${l.maxUses ? '/' + l.maxUses : ''} הצטרפו</span>`,
+        l.expires ? `<span class="mini">⏳ עד ${new Date(l.expires).toLocaleDateString('he-IL')}</span>` : '<span class="mini">♾️ ללא תפוגה</span>',
+        l.approval ? '<span class="mini">✋ באישור שלכם</span>' : '<span class="mini">⚡ אוטומטי</span>',
+        l.who === 'contacts' ? '<span class="mini">📇 אנשי קשר בלבד</span>' : l.who === 'list' ? `<span class="mini">📋 ${l.allowed.length} מספרים מורשים</span>` : ''
+      ].join('')
+      pane.innerHTML = `<p class="hint">כל קישור פותח דף שבו מזינים מספר טלפון, והוא מצורף לקבוצה לפי הכללים שתגדירו. הקישור לא מוביל ישירות לקבוצה.</p>
+        <div class="lcards">${list.length ? list.map(l => `<div class="lcard ${l.active && !l.problem ? '' : 'off'}">
+          <div class="lhead"><b>${esc(l.label || 'קישור הצטרפות')}</b><span class="switch"><input type="checkbox" data-lact="${l.id}" ${l.active ? 'checked' : ''}><span></span></span></div>
+          <div class="lurl ltr">${esc(linkUrl(l.id).replace(/^https?:\/\//, ''))}</div>
+          <div class="minis">${chips(l)}</div>
+          ${l.problem && l.active ? `<div class="lwarn">${esc(l.problem)}</div>` : ''}
+          <div class="lactions"><button class="btn small" data-lcopy="${l.id}">📋 העתקה</button>${navigator.share ? `<button class="btn small" data-lshare="${l.id}">↗ שיתוף</button>` : ''}<button class="btn small" data-ledit="${l.id}">⚙️ עריכה</button><span class="spacer"></span><button class="btn small danger" data-ldel="${l.id}" title="מחיקה">🗑</button></div>
+        </div>`).join('') : '<div class="empty"><div class="e">🔗</div>עוד אין קישורים לקבוצה הזו.</div>'}</div>
+        <button class="cta block" id="newlink">+ קישור חדש</button>`
+      pane.querySelector('#newlink').onclick = () => linkForm()
+      pane.querySelectorAll('[data-lcopy]').forEach(x => { x.onclick = () => navigator.clipboard?.writeText(linkUrl(x.dataset.lcopy)).then(() => toast('📋 הקישור הועתק')) })
+      pane.querySelectorAll('[data-lshare]').forEach(x => { x.onclick = () => navigator.share({ title: `${b.name} (הודעות)`, text: `הצטרפות לקבוצת הגיבוי "${b.name} (הודעות)"`, url: linkUrl(x.dataset.lshare) }).catch(() => {}) })
+      pane.querySelectorAll('[data-ledit]').forEach(x => { x.onclick = () => linkForm(list.find(l => l.id === x.dataset.ledit)) })
+      pane.querySelectorAll('[data-lact]').forEach(x => { x.onchange = async () => {
+        try { await userRpc('updateLink', { linkId: x.dataset.lact, options: { active: x.checked } }); changed = true; toast(x.checked ? 'הקישור פעיל' : 'הקישור הושבת'); paneLinks() } catch (e) { toast(e.message); x.checked = !x.checked }
+      } })
+      pane.querySelectorAll('[data-ldel]').forEach(x => { x.onclick = async () => {
+        if (!await confirmBox('למחוק את הקישור?', 'מי שינסה להשתמש בו יקבל הודעה שהקישור לא פעיל. מי שכבר הצטרף נשאר בקבוצה.', 'מחיקה', true)) return
+        try { await userRpc('deleteLink', { linkId: x.dataset.ldel }); changed = true; toast('הקישור נמחק'); paneLinks() } catch (e) { toast(e.message) }
+      } })
+    }
+
+    function linkForm (l) {
+      const st = { who: l?.who || 'anyone', expires: l ? null : '0', approval: !!l?.approval }
+      const seg = (name, opts, cur) => `<div class="seg seg-${opts.length}" data-seg="${name}">${opts.map(([v, t]) => `<button type="button" data-v="${v}" class="${v === cur ? 'on' : ''}">${t}</button>`).join('')}</div>`
+      pane.innerHTML = `<form id="lf" class="lform">
+        <h3>${l ? 'עריכת קישור' : 'קישור חדש'}</h3>
+        <div class="field"><label>שם הקישור <small>(רק אתם רואים)</small></label><input type="text" id="llabel" maxlength="40" placeholder="למשל: בני דודים" value="${esc(l?.label || '')}"></div>
+        <div class="field"><label>כמה אנשים יכולים להצטרף</label><input type="number" id="lmax" min="0" max="1024" placeholder="ללא הגבלה" value="${l?.maxUses || ''}"></div>
+        <div class="field"><label>תוקף${l?.expires ? ` <small>(כרגע: עד ${new Date(l.expires).toLocaleDateString('he-IL')})</small>` : ''}</label>${seg('expires', l ? [['keep', 'ללא שינוי'], ...EXPIRY] : EXPIRY, l ? 'keep' : '0')}</div>
+        <div class="field"><label>מי יכול להצטרף</label>${seg('who', WHO, st.who)}
+          <textarea id="lallowed" rows="3" placeholder="מספר בכל שורה: 050-1234567" ${st.who === 'list' ? '' : 'hidden'}>${esc((l?.allowed || []).map(fmtPhone).join('\n'))}</textarea></div>
+        <label class="toggle"><span class="t">✋ אישור ידני לכל בקשה<small>תקבלו הודעה בקבוצת הבוט ובממשק, ותחליטו</small></span><span class="switch"><input type="checkbox" id="lappr" ${st.approval ? 'checked' : ''}><span></span></span></label>
+        <div class="row" style="margin-top:18px"><button class="cta" id="lsave">${l ? 'שמירה' : 'יצירת קישור'}</button><button type="button" class="btn" id="lcancel">ביטול</button></div>
+      </form>`
+      if (l) st.expires = 'keep'
+      pane.querySelectorAll('[data-seg]').forEach(g => g.querySelectorAll('button').forEach(btn => { btn.onclick = () => {
+        g.querySelectorAll('button').forEach(x => x.classList.toggle('on', x === btn))
+        st[g.dataset.seg] = btn.dataset.v
+        if (g.dataset.seg === 'who') pane.querySelector('#lallowed').hidden = btn.dataset.v !== 'list'
+      } }))
+      pane.querySelector('#lcancel').onclick = () => paneLinks()
+      pane.querySelector('#lf').onsubmit = async e => {
+        e.preventDefault()
+        const options = {
+          label: pane.querySelector('#llabel').value,
+          maxUses: Number(pane.querySelector('#lmax').value) || 0,
+          who: st.who,
+          approval: pane.querySelector('#lappr').checked
+        }
+        if (st.who === 'list') options.allowed = pane.querySelector('#lallowed').value
+        if (st.expires !== 'keep') options.expiresDays = Number(st.expires)
+        const btn = pane.querySelector('#lsave')
+        btn.disabled = true
+        try {
+          const r = l ? await userRpc('updateLink', { linkId: l.id, options }) : await userRpc('createLink', { id: b.id, options })
+          changed = true
+          if (!l) navigator.clipboard?.writeText(linkUrl(r.link.id)).then(() => toast('🔗 הקישור נוצר והועתק'), () => toast('🔗 הקישור נוצר'))
+          else toast('💾 נשמר')
+          paneLinks()
+        } catch (err) { toast(err.message); btn.disabled = false }
+      }
+    }
+
+    async function paneMembers () {
+      pane.innerHTML = '<div class="center" style="padding:30px"><div class="spinner"></div></div>'
+      let members
+      try { members = (await userRpc('groupMembers', { id: b.id })).members } catch (e) { pane.innerHTML = `<div class="err">${esc(e.message)}</div>`; return }
+      if (tab !== 'members') return
+      members.sort((x, y) => (y.me - x.me) || (y.admin - x.admin))
+      pane.innerHTML = `<p class="hint">${members.length === 1 ? 'כרגע רק אתם בקבוצה.' : `${members.length} חברים בקבוצה`}</p>
+        <div class="list">${members.map(m => `<div class="item">
+          <div class="ico initial">${esc((m.name || (m.me ? 'א' : '#')).trim()[0])}</div>
+          <div class="txt"><div class="name">${m.me ? 'אתם' : esc(m.name || (m.phone ? fmtPhone(m.phone) : 'חבר/ה בקבוצה'))}</div><div class="meta">${m.phone && !m.me && m.name ? `<span class="ltr">${esc(fmtPhone(m.phone))}</span> · ` : ''}${m.admin ? '👑 מנהל/ת' : '👀 קריאה בלבד'}</div></div>
+          ${m.me ? '' : `<button class="btn small danger" data-mrm="${esc(m.id)}" title="הסרה מהקבוצה">✕</button>`}
+        </div>`).join('')}</div>`
+      pane.querySelectorAll('[data-mrm]').forEach(x => { x.onclick = async () => {
+        if (!await confirmBox('להסיר מהקבוצה?', 'אפשר תמיד להוסיף שוב.', 'הסרה', true)) return
+        try { await userRpc('removeMember', { id: b.id, participant: x.dataset.mrm }); toast('הוסר/ה מהקבוצה'); paneMembers() } catch (e) { toast(e.message) }
+      } })
+    }
+
+    setTab('add')
+  })
+}
+
+// ---------------- public join-link page ----------------
+async function linkPage (id) {
+  $app.innerHTML = '<div class="page center"><div class="spinner"></div></div>'
+  const info = await rpc('linkInfo', { link: id }).catch(e => ({ ok: false, error: e.message }))
+  const frame = body => {
+    $app.innerHTML = `<div class="wrap narrow page joinlink"><div class="card invite-card">${body}</div>
+      <p class="muted center powered">קבוצת גיבוי של <a href="/" data-link>אל-מחיק 🧽</a> · מה שנכתב – נשאר</p></div>`
+  }
+  const head = () => `<div class="gicon big">${info.kind === 'group' ? '👥' : '👤'}<span class="lock">🔒</span></div>
+    <p class="eyebrow">הוזמנתם לקבוצת גיבוי</p>
+    <h1>${esc(info.groupName)}</h1>
+    <p class="muted">${info.owner ? `מאת ${esc(info.owner)} · ` : ''}קבוצה לקריאה בלבד</p>`
+  if (!info.ok) {
+    frame(`${info.groupName ? head() : '<div class="big-emoji">🔗</div>'}<div class="result bad" style="margin-top:20px"><span class="rico">😕</span><div><b>${esc(info.error || 'הקישור לא תקין')}</b><p>אפשר לבקש קישור חדש ממי ששלח לכם אותו.</p></div></div>`)
+    return
+  }
+  const form = (error) => {
+    frame(`${head()}
+      <div class="minis center-minis">${info.approval ? '<span class="mini">✋ בעל הקבוצה מאשר כל בקשה</span>' : '<span class="mini">⚡ הצטרפות מיידית</span>'}${info.left != null ? `<span class="mini">🎟️ נשארו ${info.left} מקומות</span>` : ''}${info.restricted ? '<span class="mini">🔐 למורשים בלבד</span>' : ''}</div>
+      <form id="jf" class="jform">
+        ${info.approval ? '<div class="field"><label for="jn">השם שלכם</label><input type="text" id="jn" maxlength="60" autocomplete="name" placeholder="איך יציגו אתכם בבקשה"></div>' : ''}
+        <div class="field"><label for="jp">מספר הוואטסאפ שלכם</label><input type="tel" id="jp" inputmode="tel" autocomplete="tel" placeholder="050-1234567" required class="${error ? 'bad' : ''}">
+        <div class="inverr" ${error ? '' : 'hidden'}>${esc(error || '')}</div></div>
+        <button class="cta block" id="jgo">${info.approval ? 'שליחת בקשה להצטרפות' : 'הצטרפות לקבוצה'}</button>
+      </form>`)
+    const input = document.getElementById('jp')
+    if (error) selectAll(input)
+    input.addEventListener('input', () => { input.classList.remove('bad'); document.querySelector('.jform .inverr').hidden = true })
+    document.getElementById('jf').onsubmit = async e => {
+      e.preventDefault()
+      const btn = document.getElementById('jgo')
+      btn.disabled = true
+      btn.textContent = 'רגע…'
+      try {
+        const r = await rpc('linkJoin', { link: id, phone: input.value, name: document.getElementById('jn')?.value || '' })
+        done(r.status)
+      } catch (err) { form(err.message) }
+    }
+  }
+  const done = status => {
+    const R = {
+      added: ['🎉', 'הצטרפתם!', 'הקבוצה כבר מופיעה אצלכם בוואטסאפ.'],
+      invited: ['📩', 'שלחנו לכם הזמנה', 'פתחו את הוואטסאפ ולחצו על ההזמנה לקבוצה כדי להצטרף.'],
+      already: ['👌', 'אתם כבר בקבוצה', 'אין צורך לעשות כלום – היא מחכה לכם בוואטסאפ.'],
+      pending: ['⏳', 'הבקשה נשלחה', 'בעל הקבוצה יקבל אותה עכשיו. ברגע שיאשר – תצורפו אוטומטית.']
+    }[status] || ['✅', 'בוצע', '']
+    frame(`<div class="success"><div class="big-emoji">${R[0]}</div><h2>${R[1]}</h2><p class="hint" style="margin-top:10px">${R[2]}</p><p class="muted">${esc(info.groupName)}</p></div>`)
+  }
+  form()
+}
+
 // ---------------- admin ----------------
 async function admin () {
   if (!store.get('adminToken')) {
@@ -658,7 +889,7 @@ async function admin () {
   const MODES = { open: 'פתוח לכולם', limit: 'עם תקרה', invite: 'קוד הזמנה', closed: 'סגור' }
   const draw = () => {
     const s = d.settings
-    const inviteLink = `${location.origin}/join?invite=${encodeURIComponent(s.inviteCode)}`
+    const inviteLink = `${siteBase()}/join?invite=${encodeURIComponent(s.inviteCode)}`
     const up = d.server.uptime
     $app.innerHTML = `<div class="wrap page">
       <div class="card-head"><h1 style="margin:0">ניהול 🛠️</h1><div class="row"><button class="btn small" id="reload">↻ רענון</button><button class="btn small" id="out">יציאה</button></div></div>
