@@ -26,25 +26,85 @@ function toast (msg) {
   setTimeout(() => el.remove(), 2600)
 }
 
-function modal (html, onMount) {
+// Track the visible part of the screen, so sheets sit right above the on-screen keyboard.
+function syncViewport () {
+  const vv = window.visualViewport
+  const st = document.documentElement.style
+  st.setProperty('--vv-h', Math.round(vv ? vv.height : innerHeight) + 'px')
+  st.setProperty('--vv-top', Math.round(vv ? vv.offsetTop : 0) + 'px')
+}
+window.visualViewport?.addEventListener('resize', syncViewport)
+window.visualViewport?.addEventListener('scroll', syncViewport)
+window.addEventListener('resize', syncViewport)
+syncViewport()
+
+let openModals = 0
+/**
+ * Bottom sheet on phones, centered dialog on wide screens.
+ * Closes on backdrop tap, [data-close], Escape, or a downward swipe.
+ */
+function modal (html, onMount, { tall = false, onClose } = {}) {
   const el = document.createElement('div')
   el.className = 'modal'
-  el.innerHTML = `<div class="sheet" role="dialog">${html}</div>`
-  const close = () => el.remove()
+  el.innerHTML = `<div class="sheet ${tall ? 'tall' : ''}" role="dialog" aria-modal="true"><div class="grab" aria-hidden="true"></div>${html}</div>`
+  const sheet = el.querySelector('.sheet')
+  let closed = false
+  const onKey = e => { if (e.key === 'Escape') close() }
+  const close = () => {
+    if (closed) return
+    closed = true
+    document.removeEventListener('keydown', onKey)
+    el.classList.add('out')
+    setTimeout(() => {
+      el.remove()
+      if (--openModals === 0) document.documentElement.classList.remove('locked')
+    }, 230)
+    onClose?.()
+  }
   el.addEventListener('click', e => { if (e.target === el || e.target.closest('[data-close]')) close() })
+  document.addEventListener('keydown', onKey)
+
+  // swipe down to dismiss, only when the content under the finger is scrolled to the top
+  let startY = null
+  let dy = 0
+  sheet.addEventListener('touchstart', e => {
+    const scroller = e.target.closest('.scroll') || sheet
+    if (scroller.scrollTop > 0 || e.target.closest('input, textarea, .seg, .switch, .tabs')) return
+    startY = e.touches[0].clientY
+    dy = 0
+  }, { passive: true })
+  sheet.addEventListener('touchmove', e => {
+    if (startY === null) return
+    dy = Math.max(0, e.touches[0].clientY - startY)
+    sheet.style.transition = 'none'
+    sheet.style.transform = dy ? `translateY(${dy}px)` : ''
+  }, { passive: true })
+  sheet.addEventListener('touchend', () => {
+    if (startY === null) return
+    startY = null
+    sheet.style.transition = ''
+    if (dy > 90) close()
+    else sheet.style.transform = ''
+  })
+  // keep the focused field in view once the keyboard has opened
+  sheet.addEventListener('focusin', e => {
+    if (e.target.matches('input, textarea')) setTimeout(() => e.target.scrollIntoView({ block: 'nearest', behavior: 'smooth' }), 300)
+  })
+
+  openModals++
+  document.documentElement.classList.add('locked')
   document.body.append(el)
-  onMount?.(el.querySelector('.sheet'), close)
+  onMount?.(sheet, close)
   return close
 }
 
 function confirmBox (title, text, okLabel = 'אישור', danger = false) {
   return new Promise(resolve => {
+    let ok = false
     modal(`<h2>${esc(title)}</h2><p class="muted" style="margin:10px 0 22px">${esc(text)}</p>
-      <div class="row"><button class="${danger ? 'btn danger' : 'cta'}" data-ok>${esc(okLabel)}</button><button class="btn" data-close>ביטול</button></div>`,
-    (sheet, close) => {
-      sheet.querySelector('[data-ok]').onclick = () => { close(); resolve(true) }
-      sheet.querySelectorAll('[data-close]').forEach(b => b.addEventListener('click', () => resolve(false)))
-    })
+      <div class="row confirm-row"><button class="${danger ? 'btn danger' : 'cta'}" data-ok>${esc(okLabel)}</button><button class="btn" data-close>ביטול</button></div>`,
+    (sheet, close) => { sheet.querySelector('[data-ok]').onclick = () => { ok = true; close() } },
+    { onClose: () => resolve(ok) })
   })
 }
 
@@ -130,7 +190,12 @@ function render () {
   cleanup?.()
   cleanup = null
   nav()
-  window.scrollTo(0, 0)
+  window.scrollTo({ top: 0, behavior: 'instant' })
+  $app.classList.remove('enter')
+  void $app.offsetWidth
+  $app.classList.add('enter')
+  clearTimeout(render.t)
+  render.t = setTimeout(() => $app.classList.remove('enter'), 450)
   const path = location.pathname.replace(/\/+$/, '') || '/'
   const jm = path.match(/^\/j\/([A-Za-z0-9]{6,20})$/)
   const page = jm ? () => linkPage(jm[1]) : routes[path] || landing
@@ -318,7 +383,7 @@ async function join () {
 
   const askInvite = (error) => {
     const card = shell(`<h2>🎟️ יש לכם קוד הזמנה?</h2><p class="hint">ההצטרפות כרגע רק עם קוד הזמנה.</p>
-      <form id="f"><div class="field"><input class="big ${error ? 'bad' : ''}" id="inv" inputmode="numeric" autocomplete="off" placeholder="••••••" value="${esc(invite)}" required>
+      <form id="f"><div class="field"><input type="text" class="big ${error ? 'bad' : ''}" id="inv" inputmode="numeric" autocomplete="off" placeholder="••••••" value="${esc(invite)}" required>
       <div class="inverr" role="alert" ${error ? '' : 'hidden'}>${esc(error || '')}</div></div>
       <button class="cta block">המשך</button></form>`)
     const inp = card.querySelector('#inv')
@@ -675,12 +740,12 @@ function openShare (b, onChange) {
       <button class="btn small" data-close>✕</button>
     </div>
     <div class="tabs" id="stabs"><button data-t="add">➕ הוספה</button><button data-t="links">🔗 קישורים</button><button data-t="members">👥 חברים</button></div>
-    <div id="pane"></div>`, (sheet, close) => {
+    <div id="pane" class="scroll"></div>`, (sheet, close) => {
     const pane = sheet.querySelector('#pane')
-    sheet.parentElement.addEventListener('click', e => { if ((e.target === sheet.parentElement || e.target.closest('[data-close]')) && changed) onChange() })
     const setTab = t => {
       tab = t
       sheet.querySelectorAll('#stabs button').forEach(x => x.classList.toggle('on', x.dataset.t === t))
+      pane.scrollTop = 0
       ;({ add: paneAdd, links: paneLinks, members: paneMembers })[t]()
     }
     sheet.querySelectorAll('#stabs button').forEach(x => { x.onclick = () => setTab(x.dataset.t) })
@@ -733,6 +798,7 @@ function openShare (b, onChange) {
           <div class="lactions"><button class="btn small" data-lcopy="${l.id}">📋 העתקה</button>${navigator.share ? `<button class="btn small" data-lshare="${l.id}">↗ שיתוף</button>` : ''}<button class="btn small" data-ledit="${l.id}">⚙️ עריכה</button><span class="spacer"></span><button class="btn small danger" data-ldel="${l.id}" title="מחיקה">🗑</button></div>
         </div>`).join('') : '<div class="empty"><div class="e">🔗</div>עוד אין קישורים לקבוצה הזו.</div>'}</div>
         <button class="cta block" id="newlink">+ קישור חדש</button>`
+      pane.scrollTop = 0
       pane.querySelector('#newlink').onclick = () => linkForm()
       pane.querySelectorAll('[data-lcopy]').forEach(x => { x.onclick = () => navigator.clipboard?.writeText(linkUrl(x.dataset.lcopy)).then(() => toast('📋 הקישור הועתק')) })
       pane.querySelectorAll('[data-lshare]').forEach(x => { x.onclick = () => navigator.share({ title: `${b.name} (הודעות)`, text: `הצטרפות לקבוצת הגיבוי "${b.name} (הודעות)"`, url: linkUrl(x.dataset.lshare) }).catch(() => {}) })
@@ -759,6 +825,7 @@ function openShare (b, onChange) {
         <label class="toggle"><span class="t">✋ אישור ידני לכל בקשה<small>תקבלו הודעה בקבוצת הבוט ובממשק, ותחליטו</small></span><span class="switch"><input type="checkbox" id="lappr" ${st.approval ? 'checked' : ''}><span></span></span></label>
         <div class="row" style="margin-top:18px"><button class="cta" id="lsave">${l ? 'שמירה' : 'יצירת קישור'}</button><button type="button" class="btn" id="lcancel">ביטול</button></div>
       </form>`
+      pane.scrollTop = 0
       if (l) st.expires = 'keep'
       pane.querySelectorAll('[data-seg]').forEach(g => g.querySelectorAll('button').forEach(btn => { btn.onclick = () => {
         g.querySelectorAll('button').forEach(x => x.classList.toggle('on', x === btn))
@@ -807,7 +874,7 @@ function openShare (b, onChange) {
     }
 
     setTab('add')
-  })
+  }, { tall: true, onClose: () => { if (changed) onChange() } })
 }
 
 // ---------------- public join-link page ----------------
@@ -915,10 +982,10 @@ async function admin () {
       <div class="card">
         <h2>משתמשים</h2>
         ${d.users.length ? `<div class="table-wrap"><table class="table"><thead><tr><th>משתמש</th><th>מצב</th><th>גיבויים</th><th>הודעות</th><th>הצטרף</th><th></th></tr></thead><tbody>
-          ${d.users.map(u => `<tr><td><b>${esc(u.name || '—')}</b><br><span class="muted ltr">${esc(fmtPhone(u.phone))}</span></td>
-            <td><span class="status ${esc(u.status)}">${STATUS[u.status] || esc(u.status)}</span></td>
-            <td>${u.backups}</td><td>${fmtNum(u.messages)}</td><td class="muted">${new Date(u.createdAt).toLocaleDateString('he-IL')}</td>
-            <td><div class="row" style="gap:6px;flex-wrap:nowrap"><button class="btn small" data-act="restart" data-u="${u.id}" title="הפעלה מחדש">↻</button><button class="btn small" data-act="disconnect" data-u="${u.id}" title="ניתוק">⏏</button><button class="btn small danger" data-act="delete" data-u="${u.id}" title="מחיקה">🗑</button></div></td></tr>`).join('')}
+          ${d.users.map(u => `<tr><td data-l="משתמש"><b>${esc(u.name || '—')}</b><br><span class="muted ltr">${esc(fmtPhone(u.phone))}</span></td>
+            <td data-l="מצב"><span class="status ${esc(u.status)}">${STATUS[u.status] || esc(u.status)}</span></td>
+            <td data-l="גיבויים">${u.backups}</td><td data-l="הודעות">${fmtNum(u.messages)}</td><td data-l="הצטרף" class="muted">${new Date(u.createdAt).toLocaleDateString('he-IL')}</td>
+            <td class="acts-cell"><div class="row" style="gap:6px;flex-wrap:nowrap"><button class="btn small" data-act="restart" data-u="${u.id}" title="הפעלה מחדש">↻</button><button class="btn small" data-act="disconnect" data-u="${u.id}" title="ניתוק">⏏</button><button class="btn small danger" data-act="delete" data-u="${u.id}" title="מחיקה">🗑</button></div></td></tr>`).join('')}
         </tbody></table></div>` : '<div class="empty"><div class="e">🌱</div>עוד אין משתמשים</div>'}
       </div>
 
