@@ -259,8 +259,20 @@ async function join () {
       ${error ? `<div class="err">${esc(error)}</div>` : ''}
       <form id="f"><div class="field"><input class="big" id="inv" inputmode="numeric" autocomplete="off" placeholder="••••••" value="${esc(invite)}" required></div>
       <button class="cta block">המשך</button></form>`)
-    card.querySelector('#f').onsubmit = e => { e.preventDefault(); invite = card.querySelector('#inv').value.trim(); chooseMethod() }
+    card.querySelector('#f').onsubmit = e => { e.preventDefault(); verifyInvite(card.querySelector('#inv').value.trim()) }
     card.querySelector('#inv').focus()
+  }
+
+  // the invite code is checked before any pairing starts
+  async function verifyInvite (code) {
+    invite = code
+    shell('<div class="center" style="padding:30px 0"><div class="spinner"></div><p class="muted" style="margin-top:14px">בודק את הקוד…</p></div>')
+    try {
+      await rpc('checkInvite', { invite })
+      chooseMethod()
+    } catch (e) {
+      askInvite(e.message)
+    }
   }
 
   const tabs = () => `<div class="tabs"><button data-m="qr" class="${method === 'qr' ? 'on' : ''}">📷 ברקוד</button><button data-m="code" class="${method === 'code' ? 'on' : ''}">🔢 קוד לטלפון</button></div>`
@@ -352,8 +364,9 @@ async function join () {
       <a class="cta block" href="/app" data-link>לממשק הניהול ←</a></div>`)
   }
 
-  if (st.regMode === 'invite' && !invite) askInvite()
-  else chooseMethod()
+  if (st.regMode !== 'invite') chooseMethod()
+  else if (invite) verifyInvite(invite)
+  else askInvite()
 }
 
 // ---------------- login ----------------

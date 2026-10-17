@@ -1,9 +1,10 @@
 import { users, backups, sessions, loginCodes, kvGet, kvSet, normalizePhone, randomCode, sha, checkPassword, hashPassword } from './db.js'
-import { bots, startBot, stopBot } from './manager.js'
+import { bots, startBot, stopBot, registrationError } from './manager.js'
 import { mergeSettings, BOT_NAME, TYPE_LABELS } from './config.js'
 import * as T from './text.js'
 
 export class ApiError extends Error {}
+const inviteFailures = []
 const fail = msg => { throw new ApiError(msg) }
 
 function requireUser (token) {
@@ -47,6 +48,19 @@ export function publicStatus () {
 // rpc name -> handler(args)
 export const handlers = {
   status: () => publicStatus(),
+
+  // checked by the join page before pairing starts; wrong guesses are throttled globally
+  checkInvite ({ invite }) {
+    const t = Date.now()
+    while (inviteFailures.length && inviteFailures[0] < t - 10 * 60000) inviteFailures.shift()
+    if (inviteFailures.length >= 30) fail('יותר מדי ניסיונות שגויים. נסו שוב בעוד כמה דקות.')
+    const err = registrationError(invite)
+    if (err) {
+      if (/הזמנה/.test(err)) inviteFailures.push(t)
+      fail(err)
+    }
+    return { ok: true }
+  },
 
   // ---------- login with a code sent to the bot group ----------
   async loginStart ({ phone }) {
