@@ -2,6 +2,7 @@ import { links, joinRequests, users, backups, sessions, loginCodes, kvGet, kvSet
 import { bots, startBot, stopBot, registrationError } from './manager.js'
 import { mergeSettings, BOT_NAME, TYPE_LABELS } from './config.js'
 import * as T from './text.js'
+import { memory, skipped } from './guard.js'
 import { publicLinkInfo, joinByLink, decideRequest, linkView, linkFields } from './sharing.js'
 
 export class ApiError extends Error {}
@@ -101,6 +102,7 @@ export const handlers = {
     const names = Object.fromEntries(list.map(b => [b.id, b.source_name]))
     return {
       user: publicUser(user),
+      limits: { maxMediaMB: kvGet('maxMediaMB') },
       backups: list.map(b => ({ id: b.id, name: b.source_name, kind: b.kind, active: !!b.active, count: b.count, createdAt: b.created_at, links: links.forBackup(user.id, b.id).filter(l => l.active).length })),
       requests: joinRequests.pending(user.id).map(r => ({ id: r.id, phone: r.phone, name: r.name, group: names[r.backup_id] || '', createdAt: r.created_at }))
     }
@@ -243,12 +245,12 @@ export const handlers = {
       const b = backups.list(u.id)
       return { id: u.id, phone: u.phone, name: u.name, status: u.status === 'logged_out' ? 'logged_out' : (bots.get(u.id)?.status || 'stopped'), backups: b.length, messages: b.reduce((a, x) => a + x.count, 0), createdAt: u.created_at, lastSeen: u.last_seen }
     })
-    const mem = process.memoryUsage()
     return {
       users: list,
-      settings: { regMode: kvGet('regMode'), regLimit: kvGet('regLimit'), inviteCode: kvGet('inviteCode'), adminUser: kvGet('adminUser') },
+      settings: { regMode: kvGet('regMode'), regLimit: kvGet('regLimit'), inviteCode: kvGet('inviteCode'), adminUser: kvGet('adminUser'), maxMediaMB: kvGet('maxMediaMB'), mediaPerMinute: kvGet('mediaPerMinute') },
+      guard: { memory: memory(), skipped, connections: [...bots.values()].filter(b => b.status === 'open').length },
       totals: backups.totals(),
-      server: { uptime: Math.round(process.uptime()), rssMB: Math.round(mem.rss / 1048576), heapMB: Math.round(mem.heapUsed / 1048576), node: process.version }
+      server: { uptime: Math.round(process.uptime()), rssMB: memory().rssMB, heapMB: memory().heapMB, node: process.version }
     }
   },
 
@@ -258,6 +260,8 @@ export const handlers = {
     if (['open', 'limit', 'invite', 'closed'].includes(s.regMode)) kvSet('regMode', s.regMode)
     if (Number.isFinite(s.regLimit)) kvSet('regLimit', Math.max(0, Math.round(s.regLimit)))
     if (typeof s.inviteCode === 'string' && s.inviteCode.trim()) kvSet('inviteCode', s.inviteCode.trim().slice(0, 40))
+    if (Number.isFinite(s.maxMediaMB)) kvSet('maxMediaMB', Math.max(1, Math.min(100, Math.round(s.maxMediaMB))))
+    if (Number.isFinite(s.mediaPerMinute)) kvSet('mediaPerMinute', Math.max(1, Math.min(120, Math.round(s.mediaPerMinute))))
     if (typeof s.adminUser === 'string' && s.adminUser.trim()) kvSet('adminUser', s.adminUser.trim())
     if (typeof s.newPassword === 'string' && s.newPassword) {
       if (s.newPassword.length < 6) fail('הסיסמה צריכה להיות לפחות 6 תווים.')
