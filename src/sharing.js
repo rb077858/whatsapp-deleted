@@ -1,5 +1,5 @@
 // Sharing a backup group: adding people by phone, join links with rules, and approval requests.
-import { links, joinRequests, backups, contacts, users, normalizePhone } from './db.js'
+import { links, joinRequests, backups, contacts, users, normalizePhone, events } from './db.js'
 import { bots } from './manager.js'
 
 export class ShareError extends Error {}
@@ -68,7 +68,9 @@ export async function joinByLink (id, phoneInput, name) {
     ).catch(() => {})
     return { status: 'pending' }
   }
-  return { status: await addNow(link, phone) }
+  const status = await addNow(link, phone)
+  events.add(link.user_id, 'link', `${fmtPhone(phone)} הצטרף דרך קישור (${status})`)
+  return { status }
 }
 
 /** The owner approves or rejects a pending request (from the website or the bot group). */

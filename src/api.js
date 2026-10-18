@@ -1,4 +1,4 @@
-import { links, joinRequests, users, backups, sessions, loginCodes, kvGet, kvSet, normalizePhone, randomCode, sha, checkPassword, hashPassword } from './db.js'
+import { events, links, joinRequests, users, backups, sessions, loginCodes, kvGet, kvSet, normalizePhone, randomCode, sha, checkPassword, hashPassword } from './db.js'
 import { bots, startBot, stopBot, registrationError } from './manager.js'
 import { mergeSettings, BOT_NAME, TYPE_LABELS } from './config.js'
 import * as T from './text.js'
@@ -37,6 +37,8 @@ const publicUser = (u) => {
     createdAt: u.created_at
   }
 }
+
+const userStatus = u => (u.status === 'logged_out' ? 'logged_out' : (bots.get(u.id)?.status || 'stopped'))
 
 export function publicStatus () {
   const mode = kvGet('regMode')
@@ -243,13 +245,15 @@ export const handlers = {
     requireAdmin(token)
     const list = users.all().map(u => {
       const b = backups.list(u.id)
-      return { id: u.id, phone: u.phone, name: u.name, status: u.status === 'logged_out' ? 'logged_out' : (bots.get(u.id)?.status || 'stopped'), backups: b.length, messages: b.reduce((a, x) => a + x.count, 0), createdAt: u.created_at, lastSeen: u.last_seen }
+      return { id: u.id, phone: u.phone, name: u.name, status: userStatus(u), backups: b.length, messages: b.reduce((a, x) => a + x.count, 0), createdAt: u.created_at, lastSeen: u.last_seen, paused: !!u.settings.paused, requests: joinRequests.pending(u.id).length, note: u.admin_note || '' }
     })
+    const names = Object.fromEntries(list.map(u => [u.id, u.name || u.phone]))
     return {
       users: list,
       settings: { regMode: kvGet('regMode'), regLimit: kvGet('regLimit'), inviteCode: kvGet('inviteCode'), adminUser: kvGet('adminUser'), maxMediaMB: kvGet('maxMediaMB'), mediaPerMinute: kvGet('mediaPerMinute') },
       guard: { memory: memory(), skipped, connections: [...bots.values()].filter(b => b.status === 'open').length },
       totals: backups.totals(),
+      events: events.recent(40).map(e => ({ ...e, who: names[e.user_id] || null })),
       server: { uptime: Math.round(process.uptime()), rssMB: memory().rssMB, heapMB: memory().heapMB, node: process.version }
     }
   },
@@ -270,13 +274,105 @@ export const handlers = {
     return {}
   },
 
+  // ---------- customer service ----------
+  async adminUser ({ token, userId }) {
+    requireAdmin(token)
+    const u = users.get(userId) || fail('משתמש לא נמצא.')
+    const bot = bots.get(u.id)
+    return {
+      user: { id: u.id, phone: u.phone, name: u.name, status: userStatus(u), createdAt: u.created_at, lastSeen: u.last_seen, note: u.admin_note || '', settings: u.settings, hasControl: !!u.control_jid, list: u.list_id === '-' ? 'deleted' : u.list_id ? 'active' : 'none' },
+      backups: backups.list(u.id).map(b => ({ id: b.id, name: b.source_name, kind: b.kind, active: !!b.active, count: b.count, createdAt: b.created_at, links: links.forBackup(u.id, b.id).length })),
+      requests: joinRequests.pending(u.id).length,
+      events: events.recent(60, u.id),
+      online: bot?.status === 'open'
+    }
+  },
+
   async adminUserAction ({ token, userId, action }) {
     requireAdmin(token)
-    const user = users.get(userId)
-    if (!user) fail('משתמש לא נמצא.')
-    if (action === 'restart') { await stopBot(user.id); if (user.status !== 'logged_out') startBot(user.id) }
-    if (action === 'disconnect') { const b = bots.get(user.id); if (b) await b.logout(); bots.delete(user.id); users.update(user.id, { status: 'logged_out' }) }
-    if (action === 'delete') { const b = bots.get(user.id); if (b) await b.logout(); bots.delete(user.id); users.remove(user.id) }
+    const user = users.get(userId) || fail('משתמש לא נמצא.')
+    const bot = bots.get(user.id)
+    const live = () => (bot?.status === 'open' ? bot : fail('הוואטסאפ של המשתמש לא מחובר כרגע.'))
+    const log = text => events.add(user.id, 'admin', text)
+    switch (action) {
+      case 'restart':
+        await stopBot(user.id)
+        if (user.status !== 'logged_out') startBot(user.id)
+        log('המנהל הפעיל מחדש את החיבור')
+        return { message: 'החיבור הופעל מחדש' }
+      case 'disconnect':
+        if (bot) await bot.logout()
+        bots.delete(user.id)
+        users.update(user.id, { status: 'logged_out' })
+        log('המנהל ניתק את המשתמש מוואטסאפ')
+        return { message: 'נותק מוואטסאפ' }
+      case 'delete':
+        if (bot) await bot.logout()
+        bots.delete(user.id)
+        users.remove(user.id)
+        return { message: 'המשתמש נמחק' }
+      case 'recreateControl':
+        await live().createControlGroup('צוות אל-מחיק יצר לך קבוצה ראשית חדשה.')
+        return { message: 'נוצרה קבוצה ראשית חדשה' }
+      case 'relock':
+        for (const b of backups.list(user.id)) await live().lockGroup(b.backup_jid)
+        log('המנהל נעל מחדש את קבוצות הגיבוי')
+        return { message: 'ההרשאות עודכנו בכל הקבוצות' }
+      case 'rebuildList':
+        users.update(user.id, { list_id: null })
+        await live().ensureList(true)
+        log('המנהל סידר מחדש את הרשימה בוואטסאפ')
+        return { message: 'הרשימה בוואטסאפ סודרה' }
+      case 'pause':
+      case 'resume':
+        users.update(user.id, { settings: { ...user.settings, paused: action === 'pause' } })
+        log(action === 'pause' ? 'המנהל השהה את הגיבוי' : 'המנהל חידש את הגיבוי')
+        return { message: action === 'pause' ? 'הגיבוי הושהה' : 'הגיבוי חודש' }
+      case 'resetSettings':
+        users.update(user.id, { settings: { ...mergeSettings(), groupsLocked: user.settings.groupsLocked } })
+        log('המנהל איפס את ההגדרות')
+        return { message: 'ההגדרות אופסו' }
+      case 'loginAs':
+        log('המנהל נכנס לממשק של המשתמש')
+        return { token: sessions.create(user.id, 'user', 1) }
+      default:
+        fail('פעולה לא מוכרת.')
+    }
+  },
+
+  async adminBackupAction ({ token, userId, backupId, action }) {
+    requireAdmin(token)
+    const b = backups.get(String(userId), Number(backupId)) || fail('הגיבוי לא נמצא.')
+    if (action === 'remove') {
+      backups.remove(b.user_id, b.id)
+      links.removeForBackup(b.user_id, b.id)
+    } else {
+      backups.setActive(b.user_id, b.id, action === 'resume')
+    }
+    events.add(b.user_id, 'admin', `המנהל ${action === 'remove' ? 'הסיר' : action === 'resume' ? 'חידש' : 'השהה'} את הגיבוי של ${b.source_name}`)
     return {}
+  },
+
+  async adminSaveNote ({ token, userId, note }) {
+    requireAdmin(token)
+    users.update(String(userId), { admin_note: String(note || '').slice(0, 2000) })
+    return {}
+  },
+
+  async adminMessage ({ token, userId, text }) {
+    requireAdmin(token)
+    const msg = String(text || '').trim().slice(0, 2000) || fail('כתבו הודעה.')
+    const targets = userId ? [bots.get(String(userId))] : [...bots.values()]
+    let sent = 0
+    for (const bot of targets) {
+      if (bot?.status !== 'open') continue
+      try {
+        await bot.sendControl(`📣 *הודעה מצוות ${BOT_NAME}*\n\n${msg}`)
+        sent++
+        events.add(bot.userId, 'admin', `הודעה מהמנהל: ${msg.slice(0, 80)}`)
+      } catch {}
+    }
+    if (!sent) fail(userId ? 'הוואטסאפ של המשתמש לא מחובר כרגע.' : 'אין משתמשים מחוברים כרגע.')
+    return { sent }
   }
 }

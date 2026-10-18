@@ -7,7 +7,7 @@ import { SERVICE_ACCOUNT_FILE } from './config.js'
 import { handlers, ApiError, publicStatus } from './api.js'
 import { ShareError } from './sharing.js'
 import { startJoin, cancelJoin } from './manager.js'
-import { sessions, msgmap } from './db.js'
+import { sessions, msgmap, events } from './db.js'
 
 let app = null
 let fsdb = null
@@ -141,6 +141,7 @@ async function cleanup () {
   }
   sessions.prune()
   msgmap.prune(60)
+  events.prune(30)
 }
 
 export async function startRelay () {

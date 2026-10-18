@@ -8,7 +8,7 @@ import makeWASocket, {
   normalizeMessageContent, getContentType, downloadMediaMessage, jidDecode, proto, getBinaryNodeChild
 } from 'baileys'
 import { SESSIONS_DIR, TMP_DIR, BOT_NAME, BACKUP_SUFFIX } from './config.js'
-import { users, backups, msgmap, contacts } from './db.js'
+import { users, backups, msgmap, contacts, labels, listMembers, events } from './db.js'
 import { Commands } from './commands.js'
 import * as T from './text.js'
 import { maxMediaBytes, mediaAllowed, withMediaSlot, skipped } from './guard.js'
@@ -83,6 +83,7 @@ export class Bot extends EventEmitter {
     })
     sock.ev.on('groups.update', list => { for (const g of list) this.groupCache.delete(g.id); this.groupsList = null })
     sock.ev.on('group-participants.update', ({ id }) => this.groupCache.delete(id))
+    sock.ev.on('labels.edit', l => this.onLabel(l))
   }
 
   async onConnection (sock, { connection, lastDisconnect }) {
@@ -93,6 +94,8 @@ export class Bot extends EventEmitter {
       const me = sock.user || {}
       users.update(this.userId, { jid: me.id || null, lid: me.lid || null, name: me.name || me.notify || this.user?.name || null, last_seen: Date.now(), status: 'active' })
       this.log('connected as', phoneOf(me.id?.replace(/:\d+@/, '@')) || me.id)
+      if (!this.connectedOnce) events.add(this.userId, 'connected', 'התחבר לוואטסאפ')
+      this.connectedOnce = true
       this.emit('open')
       if (!this.controlChecked) {
         this.controlChecked = true
@@ -112,6 +115,7 @@ export class Bot extends EventEmitter {
   }
 
   handleLoggedOut () {
+    events.add(this.userId, 'logged_out', 'התנתק מוואטסאפ (מכשיר מקושר הוסר)')
     this.status = 'logged_out'
     this.stopped = true
     this.sock = null
@@ -164,16 +168,77 @@ export class Bot extends EventEmitter {
     if (u.control_jid) {
       try {
         const meta = await this.sock.groupMetadata(u.control_jid)
-        if (meta?.id) return
+        if (meta?.id) return this.ensureList()
       } catch (e) {
         this.log('control group not reachable, creating a new one:', e.message)
       }
     }
+    await this.createControlGroup()
+  }
+
+  /** Creates a fresh main group (also used by the admin when a user lost theirs). */
+  async createControlGroup (reason) {
     const meta = await this.sock.groupCreate(BOT_NAME, [])
     users.update(this.userId, { control_jid: meta.id })
     await this.sock.groupUpdateDescription(meta.id, `קבוצת הניהול של ${BOT_NAME} 🧽\nכתבו כאן *תפריט* כדי לראות מה אפשר לעשות.`).catch(() => {})
-    await this.sendControl(T.welcome(this.user?.name))
+    await this.sendControl(reason ? `🔄 ${reason}\n\n${T.welcome(this.user?.name)}` : T.welcome(this.user?.name))
+    events.add(this.userId, 'control_group', reason ? 'קבוצה ראשית נוצרה מחדש' : 'קבוצה ראשית נוצרה')
     this.log('created control group', meta.id)
+    await this.ensureList()
+    return meta.id
+  }
+
+  // ---------- the "אל-מחיק" chat list in WhatsApp ----------
+  onLabel (l) {
+    labels.upsert(this.userId, l)
+    // the user deleted our list in WhatsApp: respect it, don't bring it back by ourselves
+    if (l.deleted && String(l.id) === this.user?.list_id) {
+      users.update(this.userId, { list_id: '-' })
+      listMembers.clear(this.userId)
+      events.add(this.userId, 'list', 'המשתמש מחק את הרשימה בוואטסאפ')
+    }
+  }
+
+  /**
+   * Puts the main group and every backup group in one WhatsApp list.
+   * Reuses a list that already has the bot's name; creates one otherwise.
+   * `force` re-creates it even after the user deleted it (admin action).
+   */
+  async ensureList (force = false) {
+    if (!this.sock || this.status !== 'open') return
+    const u = this.user
+    let id = u.list_id
+    if (id === '-' && !force) return
+    const known = labels.all(this.userId)
+    if (id && id !== '-' && known.some(l => l.id === id && l.deleted)) id = null
+    if (!id || id === '-') {
+      const same = known.find(l => !l.deleted && (l.name || '').trim() === BOT_NAME)
+      if (same) {
+        id = same.id
+      } else {
+        const nums = known.map(l => Number(l.id)).filter(Number.isFinite)
+        id = String(nums.length ? Math.max(...nums) + 1 : 1000 + Math.floor(Math.random() * 9000))
+        await this.sock.appPatch({
+          syncAction: { labelEditAction: { name: BOT_NAME, color: 4, type: proto.SyncActionValue.LabelEditAction.ListType.CUSTOM, isActive: true } },
+          index: ['label_edit', id],
+          type: 'regular',
+          apiVersion: 3,
+          operation: proto.SyncdMutation.SyncdOperation.SET
+        })
+        labels.upsert(this.userId, { id, name: BOT_NAME, deleted: false })
+        events.add(this.userId, 'list', 'נוצרה רשימה בוואטסאפ')
+      }
+      users.update(this.userId, { list_id: id })
+      listMembers.clear(this.userId)
+    }
+    const jids = [this.user.control_jid, ...backups.list(this.userId).map(b => b.backup_jid)].filter(Boolean)
+    for (const jid of jids) {
+      if (listMembers.has(this.userId, jid)) continue
+      try {
+        await this.sock.addChatLabel(jid, id)
+        listMembers.add(this.userId, jid)
+      } catch (e) { this.log('add to list failed:', e.message) }
+    }
   }
 
   // ---------- incoming messages ----------
@@ -482,6 +547,8 @@ export class Bot extends EventEmitter {
     await this.lockGroup(meta.id)
     await this.enqueue(() => this.send(meta.id, { text: T.backupIntro(name, kind) }))
     this.log('backup created for', kind, name)
+    events.add(this.userId, 'backup', `גיבוי חדש: ${name}`)
+    this.ensureList().catch(e => this.log('list error', e.message))
     return b
   }
 }
