@@ -319,7 +319,6 @@ export const handlers = {
         log('המנהל נעל מחדש את קבוצות הגיבוי')
         return { message: 'ההרשאות עודכנו בכל הקבוצות' }
       case 'rebuildList':
-        users.update(user.id, { list_id: null })
         await live().ensureList(true)
         log('המנהל סידר מחדש את הרשימה בוואטסאפ')
         return { message: 'הרשימה בוואטסאפ סודרה' }
@@ -332,6 +331,11 @@ export const handlers = {
         users.update(user.id, { settings: { ...mergeSettings(), groupsLocked: user.settings.groupsLocked } })
         log('המנהל איפס את ההגדרות')
         return { message: 'ההגדרות אופסו' }
+      case 'diagnoseLists':
+        return { diagnosis: await live().diagnoseLists() }
+      case 'fixList':
+        await live().ensureList(true)
+        return { message: 'הרשימה נבדקה ותוקנה', diagnosis: await live().diagnoseLists() }
       case 'loginAs':
         log('המנהל נכנס לממשק של המשתמש')
         return { token: sessions.create(user.id, 'user', 1) }
