@@ -1,5 +1,5 @@
 import { initializeApp } from 'https://www.gstatic.com/firebasejs/12.6.0/firebase-app.js'
-import { getFirestore, collection, addDoc, doc, onSnapshot, serverTimestamp, updateDoc } from 'https://www.gstatic.com/firebasejs/12.6.0/firebase-firestore.js'
+import { initializeFirestore, collection, setDoc, doc, onSnapshot, serverTimestamp, updateDoc } from 'https://www.gstatic.com/firebasejs/12.6.0/firebase-firestore.js'
 
 // ---------------- helpers ----------------
 const $app = document.getElementById('app')
@@ -116,7 +116,9 @@ const uid = store.get('cid') || (() => { const id = crypto.randomUUID(); store.s
 const ready = (async () => {
   const cfg = await fetch('/__/firebase/init.json').then(r => (r.ok ? r.json() : null)).catch(() => null)
   if (!cfg) throw new Error('NOCONFIG')
-  db = getFirestore(initializeApp(cfg))
+  // Long polling is used automatically when the streaming channel is blocked (some mobile networks);
+  // after a request timed out once, this browser always uses it.
+  db = initializeFirestore(initializeApp(cfg), store.get('lp') ? { experimentalForceLongPolling: true } : { experimentalAutoDetectLongPolling: true })
 })()
 
 const server = { online: null, status: {} }
@@ -132,21 +134,33 @@ ready.then(() => {
 
 class RpcError extends Error {}
 
+const withTimeout = (p, ms, msg) => Promise.race([p, new Promise((_, rej) => setTimeout(() => rej(new RpcError(msg)), ms))])
+const SLOW = 'החיבור איטי או נתקע 🐢 נסו שוב.'
+
+/**
+ * One request to the bot server. The timeout covers the whole round trip –
+ * including writing the request – so a stuck connection can never spin forever.
+ */
 async function rpc (op, args = {}, token) {
-  await ready
+  await withTimeout(ready, 15000, SLOW)
   const data = { uid, status: 'pending', op, args, createdAt: serverTimestamp() }
   if (token) data.token = token
-  const ref = await addDoc(collection(db, 'rpc'), data)
+  const ref = doc(collection(db, 'rpc'))
   return new Promise((resolve, reject) => {
-    const timer = setTimeout(() => { off(); reject(new RpcError('השרת לא עונה כרגע 😴 נסו שוב בעוד דקה.')) }, 25000)
-    const off = onSnapshot(ref, s => {
+    let off = () => {}
+    let written = false
+    const finish = (fn, v) => { clearTimeout(timer); off(); fn(v) }
+    const timer = setTimeout(() => {
+      store.set('lp', '1') // next page load uses the more robust long-polling transport
+      finish(reject, new RpcError(written ? 'השרת לא עונה כרגע 😴 נסו שוב בעוד דקה.' : SLOW))
+    }, 20000)
+    setDoc(ref, data).then(() => { written = true }, e => finish(reject, new RpcError(e.message)))
+    off = onSnapshot(ref, s => {
       const d = s.data()
       if (!d || d.status === 'pending') return
-      clearTimeout(timer)
-      off()
-      if (d.status === 'done') resolve(d.result)
-      else reject(new RpcError(d.error === 'expired' ? 'הבקשה פגה, נסו שוב.' : d.error))
-    }, e => { clearTimeout(timer); reject(new RpcError(e.message)) })
+      if (d.status === 'done') finish(resolve, d.result)
+      else finish(reject, new RpcError(d.error === 'expired' ? 'הבקשה פגה, נסו שוב.' : d.error))
+    }, e => finish(reject, new RpcError(e.message)))
   })
 }
 
@@ -203,7 +217,8 @@ function render () {
     if (err?.message === 'NOCONFIG') {
       $app.innerHTML = `<div class="wrap narrow page"><h1>כמעט שם 🛠️</h1><p class="lead">השירות עוד לא הוגדר. מנהל השירות צריך להעלות את הגדרות Firebase בעמוד ההגדרה באפליקציה.</p></div>`
     } else {
-      $app.innerHTML = `<div class="wrap narrow page"><div class="err">${esc(err?.message || err)}</div></div>`
+      $app.innerHTML = `<div class="wrap narrow page"><div class="err">${esc(err?.message || err)}</div><button class="cta block" id="retry">🔄 לנסות שוב</button></div>`
+      document.getElementById('retry').onclick = () => location.reload()
     }
   })
 }
@@ -366,12 +381,17 @@ async function join () {
   }
 
   shell('<div class="spinner"></div>')
-  await ready
-  await new Promise(r => (server.online !== null ? r() : document.addEventListener('server', r, { once: true })))
+  await withTimeout(ready, 15000, SLOW)
+  await new Promise(r => {
+    if (server.online !== null) return r()
+    document.addEventListener('server', r, { once: true })
+    setTimeout(r, 10000)
+  })
   const st = server.status
 
   if (!server.online) {
-    shell('<h2>😴 השרת לא זמין כרגע</h2><p class="hint">נסו שוב בעוד כמה דקות.</p>')
+    const card = shell(`<h2>${server.online === null ? '🐢 לא הצלחתי להתחבר' : '😴 השרת לא זמין כרגע'}</h2><p class="hint">${server.online === null ? 'החיבור איטי או נתקע.' : 'נסו שוב בעוד כמה דקות.'}</p><button class="cta block" id="rl">🔄 לנסות שוב</button>`)
+    card.querySelector('#rl').onclick = () => { if (server.online === null) store.set('lp', '1'); location.reload() }
     return
   }
   if (st.full) {
@@ -424,16 +444,19 @@ async function join () {
     done = false
     const card = shell(`${tabs()}<div class="center" style="padding:30px 0"><div class="spinner"></div><p class="muted" style="margin-top:14px">מכין חיבור…</p></div>`)
     bindTabs(card)
-    try {
-      joinRef = await addDoc(collection(db, 'joins'), { uid, status: 'pending', method, phone: phone || '', invite, createdAt: serverTimestamp() })
-    } catch (e) {
-      return showError('לא הצלחתי להתחיל חיבור: ' + e.message)
-    }
+    joinRef = doc(collection(db, 'joins'))
     const myRef = joinRef
+    // nothing from the server within 30s: don't leave the visitor staring at a spinner
+    let heard = false
+    const silent = setTimeout(() => { if (!heard && myRef === joinRef && !done) { store.set('lp', '1'); stopJoin(); showError('השרת לא עונה כרגע. נסו שוב.') } }, 30000)
+    setDoc(myRef, { uid, status: 'pending', method, phone: phone || '', invite, createdAt: serverTimestamp() })
+      .catch(e => { clearTimeout(silent); if (myRef === joinRef) showError('לא הצלחתי להתחיל חיבור: ' + e.message) })
     offJoin = onSnapshot(myRef, s => {
       if (myRef !== joinRef) return
       const d = s.data()
-      if (!d) return
+      if (!d || d.status === 'pending') return
+      heard = true
+      clearTimeout(silent)
       if (d.status === 'qr') showQR(d.qr)
       if (d.status === 'code') showCode(d.code)
       if (d.status === 'error') {
@@ -565,6 +588,7 @@ async function dashboard () {
 
   const draw = () => {
     const u = data.user
+    const cap = data.limits?.maxMediaMB || 16
     const total = data.backups.reduce((a, b) => a + b.count, 0)
     const sw = (key, label, small, val) => `<label class="toggle"><span class="t">${label}${small ? `<small>${small}</small>` : ''}</span><span class="switch"><input type="checkbox" data-s="${key}" ${val ? 'checked' : ''}><span></span></span></label>`
     $app.innerHTML = `<div class="wrap page" style="max-width:760px">
@@ -616,8 +640,8 @@ async function dashboard () {
         ${sw('alertEdited', '✏️ התראה כשמישהו עורך הודעה', 'כולל הנוסח החדש', settings.alertEdited)}
         ${sw('includeOwn', '🙋 לגבות גם את ההודעות שלי', '', settings.includeOwn)}
         ${sw('paused', '⏸️ השהיית כל הגיבוי', 'עוצר זמנית את ההעתקה', settings.paused)}
-        <label class="toggle" style="cursor:default"><span class="t">📦 גודל קובץ מקסימלי<small>קבצים גדולים יותר יירשמו בלי הקובץ</small></span>
-          <span class="row" style="gap:6px"><input type="number" id="maxmb" min="1" max="100" value="${settings.maxMediaMB}" style="width:84px;height:44px;font-size:16px;text-align:center"> <span class="muted">MB</span></span></label>
+        <label class="toggle" style="cursor:default"><span class="t">📦 גודל קובץ מקסימלי<small>קבצים גדולים יותר יירשמו בלי הקובץ · עד ${cap}MB</small></span>
+          <span class="row" style="gap:6px"><input type="number" id="maxmb" min="1" max="${cap}" value="${Math.min(settings.maxMediaMB, cap)}" style="width:84px;height:44px;font-size:16px;text-align:center"> <span class="muted">MB</span></span></label>
       </div>
 
       <div class="card">
@@ -647,7 +671,11 @@ async function dashboard () {
     } })
     $app.querySelectorAll('[data-type]').forEach(el => { el.onclick = () => { settings.types[el.dataset.type] = !settings.types[el.dataset.type]; el.classList.toggle('on'); saveSettings() } })
     $app.querySelectorAll('[data-s]').forEach(el => { el.onchange = () => { settings[el.dataset.s] = el.checked; saveSettings(); if (el.dataset.s === 'paused') draw() } })
-    document.getElementById('maxmb').onchange = e => { settings.maxMediaMB = Number(e.target.value) || 50; saveSettings() }
+    document.getElementById('maxmb').onchange = e => {
+      settings.maxMediaMB = Math.max(1, Math.min(cap, Number(e.target.value) || cap))
+      e.target.value = settings.maxMediaMB
+      saveSettings()
+    }
     document.getElementById('logout').onclick = async () => { await rpc('logout', {}, store.get('token')).catch(() => {}); store.set('token', null); go('/') }
     document.getElementById('disconnect').onclick = async () => {
       if (!await confirmBox('לנתק את הוואטסאפ?', 'הגיבוי ייעצר והחיבור יוסר מהמכשירים המקושרים. אפשר להצטרף שוב בכל רגע.', 'ניתוק', true)) return
@@ -958,6 +986,12 @@ async function admin () {
     const s = d.settings
     const inviteLink = `${siteBase()}/join?invite=${encodeURIComponent(s.inviteCode)}`
     const up = d.server.uptime
+    const g = d.guard
+    const sk = g.skipped
+    const skippedTotal = sk.size + sk.rate + sk.memory
+    const skippedText = skippedTotal
+      ? `מאז ההפעלה דולגו ${skippedTotal} קבצים: ${[sk.size && `${sk.size} בגלל גודל`, sk.rate && `${sk.rate} בגלל קצב`, sk.memory && `${sk.memory} בגלל זיכרון`].filter(Boolean).join(', ')}. במקומם נשלחה הודעה עם שם השולח.`
+      : 'מאז ההפעלה לא דולג אף קובץ בגלל עומס.'
     $app.innerHTML = `<div class="wrap page">
       <div class="card-head"><h1 style="margin:0">ניהול 🛠️</h1><div class="row"><button class="btn small" id="reload">↻ רענון</button><button class="btn small" id="out">יציאה</button></div></div>
       <div class="stats" style="grid-template-columns:repeat(auto-fit,minmax(150px,1fr))">
@@ -966,6 +1000,20 @@ async function admin () {
         <div class="stat"><b>${fmtNum(d.totals.chats)}</b><span>צ'אטים מגובים</span></div>
         <div class="stat"><b>${fmtNum(d.totals.messages)}</b><span>הודעות נשמרו</span></div>
         <div class="stat"><b>${d.server.rssMB}MB</b><span>זיכרון · ${Math.floor(up / 3600)}ש' ${Math.floor(up % 3600 / 60)}ד' פעיל</span></div>
+      </div>
+      ${g.memory.level === 'high' ? '<div class="err">🔥 הזיכרון כמעט מלא – גיבוי קבצים מושהה זמנית. כדאי להוריד את מגבלת הקבצים או את מספר המשתמשים.</div>' : g.memory.level === 'warn' ? '<div class="ok warnbox">⚠️ הזיכרון מתקרב לתקרה. שווה לשים לב.</div>' : ''}
+
+      <div class="card">
+        <h2>🛡️ הגנות על הטלפון</h2><p class="hint">מה ששומר על הטלפון קריר: תמונות וסרטונים הם רוב העומס</p>
+        <div class="meter-row"><span>זיכרון</span><b class="ltr">${g.memory.heapMB} / ${g.memory.limitMB} MB</b></div>
+        <div class="meter ${g.memory.level}"><span style="width:${Math.min(100, g.memory.percent)}%"></span></div>
+        <p class="muted" style="margin:6px 0 18px">${g.memory.percent}% מהתקרה · ${g.connections} חיבורי וואטסאפ פעילים · ${g.memory.rssMB}MB בסך הכל</p>
+        <div class="row" style="align-items:flex-end">
+          <div class="field" style="flex:1;min-width:140px;margin:0"><label>גודל קובץ מקסימלי (MB)</label><input type="number" id="gmax" min="1" max="100" value="${s.maxMediaMB}"></div>
+          <div class="field" style="flex:1;min-width:140px;margin:0"><label>קבצים לדקה, לכל משתמש</label><input type="number" id="grate" min="1" max="120" value="${s.mediaPerMinute}"></div>
+          <button class="cta" style="height:56px" id="saveGuard">שמירה</button>
+        </div>
+        <p class="muted" style="margin-top:14px">${skippedText}</p>
       </div>
 
       <div class="card">
@@ -1010,6 +1058,10 @@ async function admin () {
     }
     document.getElementById('copyInv')?.addEventListener('click', () => navigator.clipboard?.writeText(inviteLink).then(() => toast('הקישור הועתק')))
     document.getElementById('reload').onclick = async () => { d = await adminRpc('adminOverview'); draw() }
+    document.getElementById('saveGuard').onclick = async () => {
+      const settings = { maxMediaMB: Number(document.getElementById('gmax').value), mediaPerMinute: Number(document.getElementById('grate').value) }
+      try { await adminRpc('adminSaveSettings', { settings }); d = await adminRpc('adminOverview'); draw(); toast('💾 נשמר') } catch (e) { toast(e.message) }
+    }
     document.getElementById('out').onclick = () => { store.set('adminToken', null); admin() }
     document.getElementById('cred').onsubmit = async e => {
       e.preventDefault()

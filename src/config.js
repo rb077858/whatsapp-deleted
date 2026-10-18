@@ -25,7 +25,7 @@ export const DEFAULT_USER_SETTINGS = {
   alertEdited: true,
   includeOwn: true,
   paused: false,
-  maxMediaMB: 50
+  maxMediaMB: 16
 }
 
 export const TYPE_LABELS = {

@@ -111,7 +111,9 @@ const ADMIN_DEFAULTS = {
   adminPass: '0095a5e4300830c1ef8abea446db79fa:dd9c2f943c9d84f117fedc591dce48f73d807a50c94b576beb0d485fa62c1550',
   regMode: 'invite', // open | limit | invite | closed
   regLimit: 20,
-  inviteCode: '123456'
+  inviteCode: '123456',
+  maxMediaMB: 16, // cap for every user's media size
+  mediaPerMinute: 10 // media backups per user per minute
 }
 
 export function kvGet (key) {

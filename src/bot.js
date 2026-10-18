@@ -11,6 +11,7 @@ import { SESSIONS_DIR, TMP_DIR, BOT_NAME, BACKUP_SUFFIX } from './config.js'
 import { users, backups, msgmap, contacts } from './db.js'
 import { Commands } from './commands.js'
 import * as T from './text.js'
+import { maxMediaBytes, mediaAllowed, withMediaSlot, skipped } from './guard.js'
 
 export const baileysLogger = pino({ level: process.env.BAILEYS_LOG || 'silent' })
 
@@ -302,9 +303,17 @@ export class Bot extends EventEmitter {
     const size = Number(inner.fileLength || 0)
     const caption = inner.caption ? `\n${inner.caption}` : ''
     const label = T.typeNames[mtype]
-    if (size && size > settings.maxMediaMB * 1024 * 1024) {
-      return record(await this.send(b.backup_jid, { text: `${header}\n${label} _(גדול מדי לגיבוי: ${Math.round(size / 1048576)}MB)_${caption}` }, opts), label)
-    }
+    const note = why => this.send(b.backup_jid, { text: `${header}\n${label} _(${why})_${caption}` }, opts).then(sent => record(sent, label))
+    if (size && size > maxMediaBytes(settings.maxMediaMB)) skipped.size++
+    if (size && size > maxMediaBytes(settings.maxMediaMB)) return note(`הקובץ לא גובה – ${Math.round(size / 1048576)}MB, מעל המגבלה`)
+    const allowed = mediaAllowed(this.userId)
+    if (allowed === 'rate') return note('הקובץ לא גובה – יותר מדי קבצים בדקה האחרונה')
+    if (allowed === 'memory') return note('הקובץ לא גובה – עומס זמני על השרת')
+    return withMediaSlot(() => this.transferMedia(msg, b, { mtype, inner, header, caption, label, opts, record }))
+  }
+
+  /** Downloads a media file to a temp file and sends it to the backup group. */
+  async transferMedia (msg, b, { mtype, inner, header, caption, label, opts, record }) {
     const file = path.join(TMP_DIR, `${this.userId}-${msg.key.id}`)
     try {
       const stream = await downloadMediaMessage(msg, 'stream', {}, { logger: baileysLogger, reuploadRequest: this.sock.updateMediaMessage })

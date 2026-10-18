@@ -418,3 +418,11 @@ html.locked, html.locked body { overflow: hidden; overscroll-behavior: none }
 .share-head h2 { white-space: normal; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; line-height: 1.15 }
 @media (max-width: 420px) { .share-head h2 { font-size: 19px } .share-head .muted { font-size: 13px } }
 .seg.seg-4 { grid-template-columns: repeat(4, 1fr) }
+
+/* memory meter */
+.meter-row { display: flex; justify-content: space-between; font-size: 15px; margin-bottom: 8px }
+.meter { height: 12px; border-radius: 999px; background: var(--soft); overflow: hidden }
+.meter span { display: block; height: 100%; border-radius: inherit; background: var(--green); transition: width .6s cubic-bezier(.2, .8, .3, 1) }
+.meter.warn span { background: #e0a800 }
+.meter.high span { background: var(--danger) }
+.warnbox { background: #fff3c4; color: #3d3000 }

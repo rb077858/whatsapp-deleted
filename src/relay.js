@@ -77,12 +77,22 @@ function handleJoin (doc) {
   })
 }
 
+// Each request is handled once, whether it arrives through the live listener or the watchdog.
+const seen = new Map()
+function handleOnce (collection, handler, d) {
+  if (seen.has(d.id)) return
+  seen.set(d.id, Date.now())
+  Promise.resolve(handler(d)).catch(e => console.log(`[${collection}]`, e.message))
+}
+
+const listeners = {}
 function listen (collection, handler) {
   const sub = () => {
-    const unsub = fsdb.collection(collection).where('status', '==', 'pending').onSnapshot(
+    listeners[collection]?.()
+    listeners[collection] = fsdb.collection(collection).where('status', '==', 'pending').onSnapshot(
       snap => {
         relayState.connected = true
-        for (const ch of snap.docChanges()) if (ch.type === 'added') Promise.resolve(handler(ch.doc)).catch(e => console.log(`[${collection}]`, e.message))
+        for (const ch of snap.docChanges()) if (ch.type === 'added') handleOnce(collection, handler, ch.doc)
       },
       err => {
         relayState.connected = false
@@ -90,9 +100,29 @@ function listen (collection, handler) {
         setTimeout(sub, 10000)
       }
     )
-    unsubs.push(unsub)
   }
   sub()
+  unsubs.push(() => listeners[collection]?.())
+  return sub
+}
+
+/**
+ * A live listener can stall silently (e.g. after the phone switches networks) while
+ * the heartbeat still works. Every 30s, look for requests nobody answered: handle them
+ * and re-open the listener.
+ */
+async function watchdog (subs) {
+  const cutoff = Date.now() - 12000
+  for (const [c, handler] of [['rpc', handleRpc], ['joins', handleJoin]]) {
+    const snap = await fsdb.collection(c).where('status', '==', 'pending').limit(50).get().catch(() => null)
+    if (!snap) continue
+    const stuck = snap.docs.filter(d => (d.get('createdAt')?.toMillis?.() || 0) < cutoff && !seen.has(d.id))
+    if (!stuck.length) continue
+    console.log(`[relay] watchdog: ${stuck.length} unanswered ${c} request(s), reconnecting listener`)
+    stuck.forEach(d => handleOnce(c, handler, d))
+    subs[c]()
+  }
+  for (const [id, t] of seen) if (t < Date.now() - 10 * 60000) seen.delete(id)
 }
 
 async function heartbeat (online = true) {
@@ -124,8 +154,8 @@ export async function startRelay () {
   process.env.SITE_URL ||= `https://${sa.project_id}.web.app`
   app = initializeApp({ credential: cert(sa), projectId: sa.project_id }, 'relay-' + Date.now())
   fsdb = getFirestore(app)
-  listen('rpc', handleRpc)
-  listen('joins', handleJoin)
+  const subs = { rpc: listen('rpc', handleRpc), joins: listen('joins', handleJoin) }
+  timers.push(setInterval(() => watchdog(subs).catch(e => console.log('[relay] watchdog:', e.message)), 30000))
   await heartbeat()
   timers.push(setInterval(() => heartbeat(), 60000))
   timers.push(setInterval(() => cleanup().catch(() => {}), 10 * 60000))
