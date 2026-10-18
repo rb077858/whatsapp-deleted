@@ -19,7 +19,7 @@ service cloud.firestore {
     }
 
     match /joins/{id} {
-      allow create: if newRequest(['uid', 'status', 'method', 'phone', 'invite', 'createdAt']);
+      allow create: if newRequest(['uid', 'status', 'method', 'phone', 'invite', 'relink', 'createdAt']);
       allow get: if true;
       // the page may cancel its own pairing when the visitor leaves
       allow update: if request.resource.data.diff(resource.data).affectedKeys().hasOnly(['status'])

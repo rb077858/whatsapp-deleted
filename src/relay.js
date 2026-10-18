@@ -67,7 +67,7 @@ function handleJoin (doc) {
   if (method === 'code' && phone.length < 9) return ref.update({ status: 'error', error: 'מספר הטלפון לא תקין.' })
   // stop pairing if the visitor closes the page (the website deletes the doc or sets status=cancel)
   const unsub = ref.onSnapshot(s => { if (!s.exists || s.get('status') === 'cancel') { cancelJoin(doc.id); unsub() } }, () => {})
-  startJoin(doc.id, { method, phone, invite: d.invite }, (fields) => {
+  startJoin(doc.id, { method, phone, invite: d.invite, relink: d.relink === true }, (fields) => {
     if (fields.userId) {
       fields.token = sessions.create(fields.userId)
       delete fields.userId
