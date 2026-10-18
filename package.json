@@ -5,7 +5,8 @@
   "main": "src/index.js",
   "scripts": {
     "start": "node src/index.js",
-    "dev": "PORT=3101 DATA_DIR=./.phone-data RUN_ON_PHONE=1 node src/index.js"
+    "dev": "PORT=3101 DATA_DIR=./.phone-data RUN_ON_PHONE=1 node src/index.js",
+    "test": "node --disable-warning=ExperimentalWarning test/smoke.mjs"
   },
   "repository": {
     "type": "git",

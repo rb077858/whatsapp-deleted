@@ -973,7 +973,7 @@ const UFILTERS = {
   off: ['מנותקים', u => u.status !== 'open'],
   attention: ['דורש תשומת לב', u => u.status === 'logged_out' || u.requests > 0 || u.paused]
 }
-const EVENT_ICONS = { list_error: '⚠️', joined: '🎉', connected: '🟢', logged_out: '🔴', control_group: '🏠', backup: '🗂️', list: '📋', link: '🔗', admin: '🛠️' }
+const EVENT_ICONS = { joined: '🎉', connected: '🟢', logged_out: '🔴', control_group: '🏠', backup: '🗂️', link: '🔗', admin: '🛠️' }
 function ago (ts) {
   if (!ts) return '—'
   const m = Math.round((Date.now() - ts) / 60000)
@@ -989,7 +989,6 @@ const eventRow = (e, withWho) => `<div class="tl"><span class="tl-ico">${EVENT_I
 const USER_ACTIONS = [
   ['relink', '🔌', 'חיבור מחדש בקוד', 'קוד בן 8 תווים לשלוח למשתמש', false],
   ['recreateControl', '🏠', 'קבוצה ראשית חדשה', 'כשהמשתמש מחק או יצא מהקבוצה', false],
-  ['diagnoseLists', '🩺', 'בדיקת רשימות', 'קריאה בלבד – בלי לשנות כלום', false],
   ['relock', '🔐', 'נעילת קבוצות', 'מחיל מחדש את הרשאות הקבוצות', false],
   ['restart', '♻️', 'חיבור מחדש', 'כשהבוט לא מגיב', false],
   ['loginAs', '👤', 'כניסה כמשתמש', 'פותח את הממשק שלו (ל-24 שעות)', false],
@@ -1051,7 +1050,6 @@ function openUser (userId, onChange) {
           changed = true
           if (a === 'loginAs') { store.set('token', r.token); close(); toast('👤 נכנסת לממשק של המשתמש'); return go('/app') }
           if (a === 'relink') { b.disabled = false; b.classList.remove('busy'); return showRelink(userId, data.user, async () => { changed = true; await load(); overview() }) }
-          if (a === 'diagnoseLists') { b.disabled = false; b.classList.remove('busy'); return showDiagnosis(r.diagnosis, userId) }
           if (a === 'delete') { toast('המשתמש נמחק'); return close() }
           toast('✅ ' + (r.message || 'בוצע'))
           await load()
@@ -1131,30 +1129,6 @@ function showRelink (userId, user, onDone) {
     }
     start()
   }, { onClose: () => clearInterval(timer) })
-}
-
-function showDiagnosis (dg, userId) {
-  const mine = dg.lists.find(l => !l.deleted && (l.id === dg.ourId || l.name.trim() === dg.botName))
-  const inside = mine ? dg.expected.filter(j => mine.members.includes(j)).length : 0
-  const pos = mine && dg.order ? dg.order.ids.indexOf(mine.id) : -1
-  const row = (ok, t) => `<div class="dg-row"><span>${ok ? '✅' : '❌'}</span><div>${t}</div></div>`
-  const report = () => `<div class="dg-sum">
-      ${row(!!mine, mine ? `הרשימה "${esc(mine.name)}" קיימת (מזהה ${esc(mine.id)}, ${esc(String(mine.type))})` : 'הרשימה של הבוט לא קיימת בוואטסאפ')}
-      ${mine ? row(inside === dg.expected.length, `${inside} מתוך ${dg.expected.length} הקבוצות נמצאות בה`) : ''}
-      ${mine ? row(!dg.order || pos >= 0, dg.order ? (pos >= 0 ? `מופיעה בסדר הרשימות (מקום ${pos + 1})` : 'לא מופיעה בסדר הרשימות') : 'אין רשומת סדר רשימות בחשבון') : ''}
-      ${Object.keys(dg.errors).length ? row(false, 'שגיאות בקריאה: ' + esc(JSON.stringify(dg.errors))) : ''}
-    </div>
-    <h3 class="sub-h">כל הרשימות בחשבון (${dg.lists.length})</h3>
-    <div class="list">${dg.lists.map(l => `<div class="item"><div class="ico">${l.deleted ? '🗑️' : l.type === 'CUSTOM' ? '📋' : '🏷️'}</div>
-      <div class="txt"><div class="name">${esc(l.name || '(ללא שם)')}${l.id === mine?.id ? ' · <b>של הבוט</b>' : ''}</div>
-      <div class="meta ltr">id ${esc(l.id)} · ${esc(String(l.type))} · order ${l.orderIndex ?? '–'} · active ${l.isActive ?? '–'} · ${l.members.length} chats · ${esc(l.collection)}${l.deleted ? ' · deleted' : ''}</div></div></div>`).join('') || '<div class="empty">אין רשימות</div>'}</div>
-    ${dg.order ? `<p class="muted ltr" style="margin-top:10px">order: ${esc(dg.order.ids.join(', '))} (${esc(dg.order.collection)})</p>` : ''}`
-  modal(`<div class="card-head"><h2>🩺 בדיקת רשימות</h2><button class="btn small" data-close>✕</button></div>
-    <div id="dgbody">${report()}</div>
-    <p class="muted" style="margin-top:12px">הבוט לא משנה רשימות בוואטסאפ: כתיבה כזו מבחוץ גורמת לוואטסאפ לנתק את כל המכשירים המקושרים.</p>
-    <div class="row confirm-row" style="margin-top:12px"><button class="btn" id="dgcopy">📋 העתקת הנתונים</button></div>`, (sheet) => {
-    sheet.querySelector('#dgcopy').onclick = () => navigator.clipboard?.writeText(JSON.stringify(dg, null, 1)).then(() => toast('📋 הנתונים הועתקו'))
-  }, { tall: true })
 }
 
 // ---------------- admin ----------------

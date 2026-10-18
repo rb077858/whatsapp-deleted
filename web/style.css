@@ -463,9 +463,6 @@ html.locked, html.locked body { overflow: hidden; overscroll-behavior: none }
 @media (min-width: 700px) { .facts { grid-template-columns: repeat(4, 1fr) } .actgrid { grid-template-columns: repeat(3, 1fr) } }
 .card, input, textarea, [id] { scroll-margin-top: 84px }
 
-.dg-sum { display: flex; flex-direction: column; gap: 8px; background: var(--soft); border-radius: 16px; padding: 14px }
-.dg-row { display: flex; gap: 10px; font-size: 15px; line-height: 1.4 }
-#dgbody { overflow-y: auto; flex: 1 }
 
 .relink-card { border-color: color-mix(in srgb, var(--danger) 35%, var(--line)); background: color-mix(in srgb, var(--danger) 5%, var(--card)) }
 .rl-status { display: flex; align-items: center; justify-content: center; gap: 10px; margin-top: 16px; padding: 12px; border-radius: 14px; background: var(--soft); font-size: 15px }

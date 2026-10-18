@@ -292,7 +292,7 @@ export const handlers = {
     const u = users.get(userId) || fail('משתמש לא נמצא.')
     const bot = bots.get(u.id)
     return {
-      user: { id: u.id, phone: u.phone, name: u.name, status: userStatus(u), createdAt: u.created_at, lastSeen: u.last_seen, note: u.admin_note || '', settings: u.settings, hasControl: !!u.control_jid, list: u.list_id === '-' ? 'deleted' : u.list_id ? 'active' : 'none' },
+      user: { id: u.id, phone: u.phone, name: u.name, status: userStatus(u), createdAt: u.created_at, lastSeen: u.last_seen, note: u.admin_note || '', settings: u.settings, hasControl: !!u.control_jid },
       backups: backups.list(u.id).map(b => ({ id: b.id, name: b.source_name, kind: b.kind, active: !!b.active, count: b.count, createdAt: b.created_at, links: links.forBackup(u.id, b.id).length })),
       requests: joinRequests.pending(u.id).length,
       events: events.recent(60, u.id),
@@ -339,8 +339,6 @@ export const handlers = {
         users.update(user.id, { settings: { ...mergeSettings(), groupsLocked: user.settings.groupsLocked } })
         log('המנהל איפס את ההגדרות')
         return { message: 'ההגדרות אופסו' }
-      case 'diagnoseLists':
-        return { diagnosis: await live().diagnoseLists() }
       case 'loginAs':
         log('המנהל נכנס לממשק של המשתמש')
         return { token: sessions.create(user.id, 'user', 1) }

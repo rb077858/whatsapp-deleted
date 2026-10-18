@@ -80,18 +80,6 @@ CREATE TABLE IF NOT EXISTS join_requests (
   created_at INTEGER NOT NULL
 );
 CREATE INDEX IF NOT EXISTS join_requests_user ON join_requests (user_id, status);
-CREATE TABLE IF NOT EXISTS labels (
-  user_id TEXT NOT NULL,
-  id TEXT NOT NULL,
-  name TEXT,
-  deleted INTEGER NOT NULL DEFAULT 0,
-  PRIMARY KEY (user_id, id)
-);
-CREATE TABLE IF NOT EXISTS list_members (
-  user_id TEXT NOT NULL,
-  jid TEXT NOT NULL,
-  PRIMARY KEY (user_id, jid)
-);
 CREATE TABLE IF NOT EXISTS events (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   ts INTEGER NOT NULL,
@@ -109,7 +97,7 @@ CREATE TABLE IF NOT EXISTS login_codes (
 `)
 
 // columns added after the first release
-for (const sql of ['ALTER TABLE users ADD COLUMN list_id TEXT', 'ALTER TABLE users ADD COLUMN admin_note TEXT']) {
+for (const sql of ['ALTER TABLE users ADD COLUMN admin_note TEXT']) {
   try { db.exec(sql) } catch {}
 }
 
@@ -172,7 +160,7 @@ export const users = {
     db.prepare(`UPDATE users SET ${keys.map(k => `${k} = ?`).join(', ')} WHERE id = ?`).run(...vals, id)
   },
   remove (id) {
-    for (const t of ['backups', 'msgmap', 'contacts', 'web_sessions', 'links', 'join_requests', 'labels', 'list_members']) db.prepare(`DELETE FROM ${t} WHERE user_id = ?`).run(id)
+    for (const t of ['backups', 'msgmap', 'contacts', 'web_sessions', 'links', 'join_requests']) db.prepare(`DELETE FROM ${t} WHERE user_id = ?`).run(id)
     db.prepare('DELETE FROM users WHERE id = ?').run(id)
   }
 }
@@ -228,18 +216,6 @@ export const joinRequests = {
   pending: userId => db.prepare("SELECT * FROM join_requests WHERE user_id = ? AND status = 'pending' ORDER BY created_at").all(userId),
   pendingFor: (linkId, phone) => db.prepare("SELECT * FROM join_requests WHERE link_id = ? AND phone = ? AND status = 'pending'").get(linkId, phone),
   setStatus: (userId, id, status) => db.prepare('UPDATE join_requests SET status = ? WHERE user_id = ? AND id = ?').run(status, userId, id)
-}
-
-// ---------- WhatsApp lists (labels) ----------
-export const labels = {
-  upsert: (userId, l) => db.prepare(`INSERT INTO labels (user_id, id, name, deleted) VALUES (?, ?, ?, ?)
-    ON CONFLICT(user_id, id) DO UPDATE SET name = COALESCE(excluded.name, name), deleted = excluded.deleted`).run(userId, String(l.id), l.name ?? null, l.deleted ? 1 : 0),
-  all: userId => db.prepare('SELECT * FROM labels WHERE user_id = ?').all(userId)
-}
-export const listMembers = {
-  has: (userId, jid) => !!db.prepare('SELECT 1 FROM list_members WHERE user_id = ? AND jid = ?').get(userId, jid),
-  add: (userId, jid) => db.prepare('INSERT OR IGNORE INTO list_members (user_id, jid) VALUES (?, ?)').run(userId, jid),
-  clear: userId => db.prepare('DELETE FROM list_members WHERE user_id = ?').run(userId)
 }
 
 // ---------- event log (for the admin's customer-service view) ----------
