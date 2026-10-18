@@ -11,6 +11,7 @@ import { SESSIONS_DIR, TMP_DIR, BOT_NAME, BACKUP_SUFFIX } from './config.js'
 import { users, backups, msgmap, contacts, labels, listMembers, events } from './db.js'
 import { Commands } from './commands.js'
 import * as T from './text.js'
+import { scanLists } from './appstate.js'
 import { maxMediaBytes, mediaAllowed, withMediaSlot, skipped } from './guard.js'
 
 export const baileysLogger = pino({ level: process.env.BAILEYS_LOG || 'silent' })
@@ -62,7 +63,7 @@ export class Bot extends EventEmitter {
       return this.handleLoggedOut()
     }
     const sock = makeWASocket({
-      auth: { creds: state.creds, keys: makeCacheableSignalKeyStore(state.keys, baileysLogger) },
+      auth: { creds: state.creds, keys: (this.keys = makeCacheableSignalKeyStore(state.keys, baileysLogger)) },
       logger: baileysLogger,
       browser: Browsers.macOS('Chrome'),
       markOnlineOnConnect: false,
@@ -168,7 +169,7 @@ export class Bot extends EventEmitter {
     if (u.control_jid) {
       try {
         const meta = await this.sock.groupMetadata(u.control_jid)
-        if (meta?.id) return this.ensureList()
+        if (meta?.id) return this.ensureList().catch(() => {})
       } catch (e) {
         this.log('control group not reachable, creating a new one:', e.message)
       }
@@ -184,7 +185,7 @@ export class Bot extends EventEmitter {
     await this.sendControl(reason ? `🔄 ${reason}\n\n${T.welcome(this.user?.name)}` : T.welcome(this.user?.name))
     events.add(this.userId, 'control_group', reason ? 'קבוצה ראשית נוצרה מחדש' : 'קבוצה ראשית נוצרה')
     this.log('created control group', meta.id)
-    await this.ensureList()
+    await this.ensureList().catch(() => {})
     return meta.id
   }
 
@@ -201,229 +202,86 @@ export class Bot extends EventEmitter {
 
   /**
    * Puts the main group and every backup group in one WhatsApp list.
-   * Reuses a list that already has the bot's name; creates one otherwise.
-   * `force` re-creates it even after the user deleted it (admin action).
+   * On a full run it first reads the lists that really exist in the account, reuses a list
+   * with the bot's name, and creates ours in the same format as the user's own lists –
+   * including WhatsApp's list-order record, which the phone uses to show lists.
+   * `force` brings the list back even after the user deleted it (admin action).
    */
-  async ensureList (force = false) {
+  async ensureList (force = false, full = true) {
     if (!this.sock || this.status !== 'open') return
-    const u = this.user
-    let id = u.list_id
+    try {
+      return await this.syncList(force, full)
+    } catch (e) {
+      this.log('list error:', e.message)
+      events.add(this.userId, 'list_error', `שגיאה ברשימה: ${e.message}`)
+      throw e
+    }
+  }
+
+  async syncList (force, full) {
+    let id = this.user.list_id
     if (id === '-' && !force) return
-    const known = labels.all(this.userId)
-    if (id && id !== '-' && known.some(l => l.id === id && l.deleted)) id = null
-    if (!id || id === '-') {
-      const same = known.find(l => !l.deleted && (l.name || '').trim() === BOT_NAME)
-      if (same) {
-        id = same.id
-      } else {
-        const nums = known.map(l => Number(l.id)).filter(Number.isFinite)
-        id = String(nums.length ? Math.max(...nums) + 1 : 1000 + Math.floor(Math.random() * 9000))
-        await this.sock.appPatch({
-          syncAction: { labelEditAction: { name: BOT_NAME, color: 4, type: proto.SyncActionValue.LabelEditAction.ListType.CUSTOM, isActive: true } },
-          index: ['label_edit', id],
-          type: 'regular',
-          apiVersion: 3,
-          operation: proto.SyncdMutation.SyncdOperation.SET
-        })
-        labels.upsert(this.userId, { id, name: BOT_NAME, deleted: false })
-        events.add(this.userId, 'list', 'נוצרה רשימה בוואטסאפ')
-      }
-      users.update(this.userId, { list_id: id })
+    const jids = [this.user.control_jid, ...backups.list(this.userId).map(b => b.backup_jid)].filter(Boolean)
+    if (!full && id && id !== '-') {
+      for (const jid of jids) if (!listMembers.has(this.userId, jid)) await this.labelChat(jid, id)
+      return
+    }
+    const scan = await this.scanLists()
+    const live = scan.lists.filter(l => !l.deleted)
+    let mine = live.find(l => l.id === id) || live.find(l => l.name.trim() === BOT_NAME)
+    if (!mine) {
+      // model the new list on a list the user made in WhatsApp, if there is one
+      const model = live.find(l => l.type === 'CUSTOM')
+      const used = scan.lists.map(l => Number(l.id)).filter(Number.isFinite)
+      const newId = String(used.length ? Math.max(...used) + 1 : 1000 + Math.floor(Math.random() * 9000))
+      const orderIndex = Math.max(0, ...live.map(l => Number(l.orderIndex) || 0)) + 1
+      await this.sock.appPatch({
+        syncAction: { labelEditAction: { name: BOT_NAME, color: model?.color ?? 4, type: proto.SyncActionValue.LabelEditAction.ListType.CUSTOM, isActive: true, orderIndex } },
+        index: ['label_edit', newId],
+        type: model?.collection || 'regular',
+        apiVersion: model?.apiVersion || 3,
+        operation: proto.SyncdMutation.SyncdOperation.SET
+      })
+      mine = { id: newId, members: [] }
+      labels.upsert(this.userId, { id: newId, name: BOT_NAME, deleted: false })
+      events.add(this.userId, 'list', `נוצרה רשימה בוואטסאפ (מזהה ${newId}${model ? ', לפי רשימה קיימת' : ''})`)
+    }
+    if (mine.id !== this.user.list_id) {
+      users.update(this.userId, { list_id: mine.id })
       listMembers.clear(this.userId)
     }
-    const jids = [this.user.control_jid, ...backups.list(this.userId).map(b => b.backup_jid)].filter(Boolean)
+    // the phone shows lists in the order kept in labelReorderingAction: make sure ours is there
+    if (scan.order && !scan.order.ids.includes(mine.id)) {
+      await this.sock.appPatch({
+        syncAction: { labelReorderingAction: { sortedLabelIds: [...scan.order.ids, mine.id].map(Number) } },
+        index: scan.order.index,
+        type: scan.order.collection,
+        apiVersion: scan.order.apiVersion || 3,
+        operation: proto.SyncdMutation.SyncdOperation.SET
+      })
+      events.add(this.userId, 'list', 'הרשימה נוספה לסדר הרשימות בוואטסאפ')
+    }
+    const inList = new Set(mine.members || [])
     for (const jid of jids) {
-      if (listMembers.has(this.userId, jid)) continue
-      try {
-        await this.sock.addChatLabel(jid, id)
-        listMembers.add(this.userId, jid)
-      } catch (e) { this.log('add to list failed:', e.message) }
+      if (inList.has(jid)) listMembers.add(this.userId, jid)
+      else await this.labelChat(jid, mine.id)
     }
   }
 
-  // ---------- incoming messages ----------
-  async onMessages ({ messages, type }) {
-    const u = this.user
-    if (!u) return
-    for (const msg of messages) {
-      if (!msg.message || !msg.key?.remoteJid) continue
-      const jid = msg.key.remoteJid
-      if (jid === 'status@broadcast' || jid.endsWith('@newsletter')) continue
-      if (this.sentIds.has(msg.key.id)) continue
-      this.rememberSender(msg)
-      if (jid === u.control_jid) {
-        if (msg.key.fromMe && type === 'notify') await this.commands.handle(msg)
-        continue
-      }
-      if (type !== 'notify') continue
-      if (backups.byBackupJid(this.userId, jid)) continue
-      const b = backups.bySource(this.userId, jid) || (msg.key.remoteJidAlt && backups.bySource(this.userId, msg.key.remoteJidAlt))
-      if (!b || !b.active || u.settings.paused) continue
-      this.enqueue(() => this.backupMessage(msg, b, u.settings))
-    }
+  scanLists () { return scanLists(this.sock, this.keys) }
+
+  async labelChat (jid, id) {
+    await this.sock.addChatLabel(jid, id)
+    listMembers.add(this.userId, jid)
   }
 
-  rememberSender (msg) {
-    if (msg.key.fromMe || !msg.pushName) return
-    const isGroup = msg.key.remoteJid.endsWith('@g.us')
-    const a = isGroup ? msg.key.participant : msg.key.remoteJid
-    const b = isGroup ? msg.key.participantAlt : msg.key.remoteJidAlt
-    const pn = [a, b].find(j => j?.endsWith('@s.whatsapp.net'))
-    const lid = [a, b].find(j => j?.endsWith('@lid'))
-    if (pn || lid) contacts.upsert(this.userId, { jid: pn || lid, alt: pn ? lid : null, notify: msg.pushName })
+  /** For the admin: what WhatsApp really has, to understand list problems. */
+  async diagnoseLists () {
+    if (!this.sock || this.status !== 'open') throw new Error('הוואטסאפ לא מחובר כרגע')
+    const scan = await this.scanLists()
+    return { ...scan, ourId: this.user.list_id || null, botName: BOT_NAME, expected: [this.user.control_jid, ...backups.list(this.userId).map(b => b.backup_jid)].filter(Boolean) }
   }
 
-  saveContacts (list) {
-    for (const c of list) {
-      const pn = c.phoneNumber || (c.id?.endsWith('@s.whatsapp.net') ? c.id : null)
-      const lid = c.lid || (c.id?.endsWith('@lid') ? c.id : null)
-      const jid = pn || lid
-      if (!jid) continue
-      contacts.upsert(this.userId, { jid, alt: pn ? lid : null, name: c.name || null, notify: c.notify || c.verifiedName || null })
-    }
-  }
-
-  senderName (msg) {
-    if (msg.key.fromMe) return this.user?.name ? `${this.user.name} (אני)` : 'אני'
-    const isGroup = msg.key.remoteJid.endsWith('@g.us')
-    const ids = isGroup ? [msg.key.participant, msg.key.participantAlt] : [msg.key.remoteJid, msg.key.remoteJidAlt]
-    let notify = null
-    for (const id of ids.filter(Boolean)) {
-      const c = contacts.get(this.userId, id)
-      if (c?.name) return c.name
-      notify = notify || c?.notify
-    }
-    if (msg.pushName || notify) return msg.pushName || notify
-    const pn = ids.map(phoneOf).find(Boolean)
-    return pn ? '+' + pn : 'לא ידוע'
-  }
-
-  // ---------- the backup itself ----------
-  async backupMessage (msg, b, settings) {
-    const content = normalizeMessageContent(msg.message)
-    const ctype = getContentType(content)
-    if (!ctype) return
-    const sender = this.senderName(msg)
-    if (ctype === 'protocolMessage') return this.handleProtocol(msg, b, settings, content.protocolMessage, sender)
-    if (msg.key.fromMe && !settings.includeOwn) return
-    if (['reactionMessage', 'senderKeyDistributionMessage', 'messageContextInfo', 'pollUpdateMessage', 'keepInChatMessage', 'pinInChatMessage'].includes(ctype)) return
-
-    const inner = content[ctype]
-    const ctx = inner?.contextInfo
-    const quotedMap = ctx?.stanzaId ? msgmap.get(this.userId, ctx.stanzaId) : null
-    const opts = quotedMap
-      ? { quoted: { key: { remoteJid: b.backup_jid, id: quotedMap.backup_id, fromMe: true }, message: { conversation: quotedMap.preview || '' } } }
-      : undefined
-    let header = `*${sender}*`
-    if (!quotedMap && ctx?.quotedMessage) {
-      const q = textOf(normalizeMessageContent(ctx.quotedMessage)) || '[מדיה]'
-      header += `\n↩️ _בתגובה ל: "${q.slice(0, 80)}${q.length > 80 ? '…' : ''}"_`
-    }
-    if (ctx?.isForwarded) header += '\n_↪️ הועברה_'
-
-    const record = (sent, preview) => {
-      if (!sent?.key?.id) return
-      msgmap.put(this.userId, msg.key.id, { backup_jid: b.backup_jid, backup_id: sent.key.id, sender, preview })
-      backups.bump(b.id)
-    }
-    const sendText = async (text, preview = text) => record(await this.send(b.backup_jid, { text: `${header}\n${text}` }, opts), preview)
-
-    if (ctype === 'conversation' || ctype === 'extendedTextMessage') {
-      if (!settings.types.text) return
-      return sendText(textOf(content))
-    }
-    if (ctype.startsWith('pollCreationMessage')) {
-      if (!settings.types.text) return
-      const opts2 = (inner.options || []).map(o => `▫️ ${o.optionName}`).join('\n')
-      return sendText(`📊 *סקר:* ${inner.name}\n${opts2}`, `סקר: ${inner.name}`)
-    }
-    if (ctype === 'locationMessage' || ctype === 'liveLocationMessage') {
-      if (!settings.types.location) return
-      const head = await this.send(b.backup_jid, { text: `${header}\n${T.typeNames.location}${inner.name ? ': ' + inner.name : ''}` }, opts)
-      record(head, '📍 מיקום')
-      await this.send(b.backup_jid, { location: { degreesLatitude: inner.degreesLatitude, degreesLongitude: inner.degreesLongitude, name: inner.name || undefined, address: inner.address || undefined } })
-      return
-    }
-    if (ctype === 'contactMessage' || ctype === 'contactsArrayMessage') {
-      if (!settings.types.contact) return
-      const list = ctype === 'contactMessage' ? [inner] : (inner.contacts || [])
-      const head = await this.send(b.backup_jid, { text: `${header}\n${T.typeNames.contact}: ${list.map(c => c.displayName).join(', ')}` }, opts)
-      record(head, '👤 איש קשר')
-      await this.send(b.backup_jid, { contacts: { displayName: list[0]?.displayName || 'איש קשר', contacts: list.map(c => ({ vcard: c.vcard })) } })
-      return
-    }
-    const mtype = MEDIA_TYPES[ctype]
-    if (mtype) {
-      if (!settings.types[mtype]) return
-      return this.backupMedia(msg, b, settings, { ctype, mtype, inner, header, opts, record })
-    }
-    // anything else (events, buttons, etc.) – keep a short note so the backup stays complete
-    if (settings.types.text) {
-      const t = textOf(content)
-      if (t) return sendText(t)
-    }
-  }
-
-  async backupMedia (msg, b, settings, { ctype, mtype, inner, header, opts, record }) {
-    const size = Number(inner.fileLength || 0)
-    const caption = inner.caption ? `\n${inner.caption}` : ''
-    const label = T.typeNames[mtype]
-    const note = why => this.send(b.backup_jid, { text: `${header}\n${label} _(${why})_${caption}` }, opts).then(sent => record(sent, label))
-    if (size && size > maxMediaBytes(settings.maxMediaMB)) skipped.size++
-    if (size && size > maxMediaBytes(settings.maxMediaMB)) return note(`הקובץ לא גובה – ${Math.round(size / 1048576)}MB, מעל המגבלה`)
-    const allowed = mediaAllowed(this.userId)
-    if (allowed === 'rate') return note('הקובץ לא גובה – יותר מדי קבצים בדקה האחרונה')
-    if (allowed === 'memory') return note('הקובץ לא גובה – עומס זמני על השרת')
-    return withMediaSlot(() => this.transferMedia(msg, b, { mtype, inner, header, caption, label, opts, record }))
-  }
-
-  /** Downloads a media file to a temp file and sends it to the backup group. */
-  async transferMedia (msg, b, { mtype, inner, header, caption, label, opts, record }) {
-    const file = path.join(TMP_DIR, `${this.userId}-${msg.key.id}`)
-    try {
-      const stream = await downloadMediaMessage(msg, 'stream', {}, { logger: baileysLogger, reuploadRequest: this.sock.updateMediaMessage })
-      await pipeline(stream, fs.createWriteStream(file))
-      const media = { url: file }
-      const thumb = inner.jpegThumbnail ? Buffer.from(inner.jpegThumbnail) : undefined
-      let sent
-      if (mtype === 'image') {
-        sent = await this.send(b.backup_jid, { image: media, caption: header + caption, mimetype: inner.mimetype, jpegThumbnail: thumb }, opts)
-      } else if (mtype === 'video') {
-        sent = await this.send(b.backup_jid, { video: media, caption: header + caption, mimetype: inner.mimetype, gifPlayback: !!inner.gifPlayback, jpegThumbnail: thumb, seconds: inner.seconds || undefined }, opts)
-      } else if (mtype === 'document') {
-        sent = await this.send(b.backup_jid, { document: media, caption: header + caption, mimetype: inner.mimetype || 'application/octet-stream', fileName: inner.fileName || 'file', jpegThumbnail: thumb }, opts)
-      } else {
-        // audio and stickers cannot carry a caption: announce the sender first
-        sent = await this.send(b.backup_jid, { text: `${header}\n${label}` }, opts)
-        if (mtype === 'audio') {
-          await this.send(b.backup_jid, { audio: media, mimetype: inner.mimetype || 'audio/ogg; codecs=opus', ptt: !!inner.ptt, seconds: inner.seconds || 1, waveform: inner.waveform || undefined })
-        } else {
-          await this.send(b.backup_jid, { sticker: media, isAnimated: !!inner.isAnimated })
-        }
-      }
-      record(sent, inner.caption || label)
-    } catch (e) {
-      this.log('media backup failed:', e.message)
-      record(await this.send(b.backup_jid, { text: `${header}\n${label} _(לא הצלחתי להוריד את הקובץ)_${caption}` }, opts), label)
-    } finally {
-      fs.rm(file, { force: true }, () => {})
-    }
-  }
-
-  async handleProtocol (msg, b, settings, pm, sender) {
-    const target = pm.key?.id
-    const mm = target && msgmap.get(this.userId, target)
-    if (!mm) return
-    const quoted = { quoted: { key: { remoteJid: b.backup_jid, id: mm.backup_id, fromMe: true }, message: { conversation: mm.preview || '' } } }
-    if (pm.type === proto.Message.ProtocolMessage.Type.REVOKE && settings.alertDeleted) {
-      await this.send(b.backup_jid, { text: `🗑️ *${sender}* מחק/ה את ההודעה הזו` }, quoted)
-    } else if (pm.type === proto.Message.ProtocolMessage.Type.MESSAGE_EDIT && settings.alertEdited) {
-      const t = textOf(normalizeMessageContent(pm.editedMessage))
-      await this.send(b.backup_jid, { text: `✏️ *${sender}* ערך/ה את ההודעה הזו ל:\n${t}` }, quoted)
-    }
-  }
-
-  // ---------- backup group permissions & members ----------
   /** Only admins (the user) may send, edit the group info, or add members. */
   async lockGroup (jid) {
     for (const [fn, arg] of [['groupSettingUpdate', 'announcement'], ['groupSettingUpdate', 'locked'], ['groupMemberAddMode', 'admin_add']]) {
@@ -548,7 +406,7 @@ export class Bot extends EventEmitter {
     await this.enqueue(() => this.send(meta.id, { text: T.backupIntro(name, kind) }))
     this.log('backup created for', kind, name)
     events.add(this.userId, 'backup', `גיבוי חדש: ${name}`)
-    this.ensureList().catch(e => this.log('list error', e.message))
+    this.ensureList(false, false).catch(() => {})
     return b
   }
 }

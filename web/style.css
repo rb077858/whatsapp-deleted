@@ -462,3 +462,7 @@ html.locked, html.locked body { overflow: hidden; overscroll-behavior: none }
 #bcast { margin-top: 2px }
 @media (min-width: 700px) { .facts { grid-template-columns: repeat(4, 1fr) } .actgrid { grid-template-columns: repeat(3, 1fr) } }
 .card, input, textarea, [id] { scroll-margin-top: 84px }
+
+.dg-sum { display: flex; flex-direction: column; gap: 8px; background: var(--soft); border-radius: 16px; padding: 14px }
+.dg-row { display: flex; gap: 10px; font-size: 15px; line-height: 1.4 }
+#dgbody { overflow-y: auto; flex: 1 }
