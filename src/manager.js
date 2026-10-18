@@ -3,7 +3,7 @@ import path from 'node:path'
 import QRCode from 'qrcode'
 import makeWASocket, { Browsers, DisconnectReason, useMultiFileAuthState, makeCacheableSignalKeyStore, jidDecode } from 'baileys'
 import { PENDING_DIR, SESSIONS_DIR } from './config.js'
-import { users, kvGet } from './db.js'
+import { users, kvGet, events } from './db.js'
 import { Bot, baileysLogger } from './bot.js'
 
 const JOIN_TIMEOUT = 3 * 60000
@@ -97,8 +97,10 @@ export async function startJoin (joinId, { method, phone, invite }, update) {
       return update({ status: 'error', error: regErr })
     }
     let user = users.byPhone(pn)
+    const returning = !!user
     if (user) await stopBot(user.id)
     else user = users.create(pn)
+    events.add(user.id, 'joined', returning ? 'התחבר מחדש דרך האתר' : 'הצטרף לשירות')
     users.update(user.id, { status: 'active', name: creds.me?.name || user.name })
     const target = path.join(SESSIONS_DIR, user.id, 'auth')
     fs.rmSync(target, { recursive: true, force: true })

@@ -194,7 +194,7 @@ function nav () {
     : location.pathname.startsWith('/admin')
     ? '<a class="navlink" href="/" data-link>לאתר</a>'
     : logged
-      ? '<a class="navlink" href="/app" data-link>הניהול שלי</a>'
+      ? '<a class="navlink" href="/app" data-link>🧽 הגיבויים שלי</a>'
       : '<a class="navlink hide-sm" href="/login" data-link>כניסה</a><a class="btn" href="/join" data-link>הצטרפות</a>'
 }
 
@@ -956,6 +956,134 @@ async function linkPage (id) {
   form()
 }
 
+// ---------------- admin: customer service ----------------
+const UFILTERS = {
+  all: ['הכל', () => true],
+  open: ['מחוברים', u => u.status === 'open'],
+  off: ['מנותקים', u => u.status !== 'open'],
+  attention: ['דורש תשומת לב', u => u.status === 'logged_out' || u.requests > 0 || u.paused]
+}
+const EVENT_ICONS = { joined: '🎉', connected: '🟢', logged_out: '🔴', control_group: '🏠', backup: '🗂️', list: '📋', link: '🔗', admin: '🛠️' }
+function ago (ts) {
+  if (!ts) return '—'
+  const m = Math.round((Date.now() - ts) / 60000)
+  if (m < 1) return 'עכשיו'
+  if (m < 60) return `לפני ${m} ד׳`
+  const h = Math.round(m / 60)
+  if (h < 24) return `לפני ${h} ש׳`
+  const days = Math.round(h / 24)
+  return days < 30 ? `לפני ${days} ימים` : new Date(ts).toLocaleDateString('he-IL')
+}
+const eventRow = (e, withWho) => `<div class="tl"><span class="tl-ico">${EVENT_ICONS[e.type] || '•'}</span><div class="tl-txt">${withWho && e.who ? `<b>${esc(e.who)}</b> · ` : ''}${esc(e.text)}<small>${ago(e.ts)}</small></div></div>`
+
+const USER_ACTIONS = [
+  ['recreateControl', '🏠', 'קבוצה ראשית חדשה', 'כשהמשתמש מחק או יצא מהקבוצה', false],
+  ['rebuildList', '📋', 'סידור הרשימה', 'מחזיר את כל הקבוצות לרשימה בוואטסאפ', false],
+  ['relock', '🔐', 'נעילת קבוצות', 'מחיל מחדש את הרשאות הקבוצות', false],
+  ['restart', '♻️', 'חיבור מחדש', 'כשהבוט לא מגיב', false],
+  ['loginAs', '👤', 'כניסה כמשתמש', 'פותח את הממשק שלו (ל-24 שעות)', false],
+  ['pause', '⏸️', 'השהיית גיבוי', '', false],
+  ['resume', '▶️', 'חידוש גיבוי', '', false],
+  ['resetSettings', '↺', 'איפוס הגדרות', 'מחזיר לברירות המחדל', false],
+  ['disconnect', '⏏', 'ניתוק מוואטסאפ', 'מסיר את המכשיר המקושר', true],
+  ['delete', '🗑', 'מחיקת משתמש', 'כולל כל הנתונים שלו בשרת', true]
+]
+
+function openUser (userId, onChange) {
+  let tab = 'overview'
+  let data = null
+  let changed = false
+  modal(`<div class="share-head" id="uhead"><div class="gicon">👤</div><div class="txt"><h2>טוען…</h2></div><button class="btn small" data-close>✕</button></div>
+    <div class="tabs" id="utabs"><button data-t="overview">סקירה</button><button data-t="backups">גיבויים</button><button data-t="log">יומן</button><button data-t="msg">הודעה</button></div>
+    <div id="upane" class="scroll"><div class="center" style="padding:30px"><div class="spinner"></div></div></div>`, async (sheet, close) => {
+    const pane = sheet.querySelector('#upane')
+    const load = async () => {
+      data = await adminRpc('adminUser', { userId })
+      const u = data.user
+      sheet.querySelector('#uhead').innerHTML = `<div class="gicon initial-big">${esc((u.name || '#').trim()[0])}</div>
+        <div class="txt"><h2>${esc(u.name || fmtPhone(u.phone))}</h2><p class="muted"><span class="ltr">${esc(fmtPhone(u.phone))}</span> · <span class="status ${esc(u.status)}">${STATUS[u.status] || esc(u.status)}</span></p></div>
+        <button class="btn small" data-close>✕</button>`
+    }
+    const setTab = t => {
+      tab = t
+      sheet.querySelectorAll('#utabs button').forEach(x => x.classList.toggle('on', x.dataset.t === t))
+      pane.scrollTop = 0
+      ;({ overview, backups: backupsPane, log, msg })[t]()
+    }
+    sheet.querySelectorAll('#utabs button').forEach(x => { x.onclick = () => setTab(x.dataset.t) })
+
+    function overview () {
+      const u = data.user
+      const fact = (k, v) => `<div class="fact"><span>${k}</span><b>${v}</b></div>`
+      pane.innerHTML = `<div class="facts">
+          ${fact('הצטרף', new Date(u.createdAt).toLocaleDateString('he-IL'))}
+          ${fact('נראה לאחרונה', ago(u.lastSeen))}
+          ${fact('גיבויים', data.backups.length)}
+          ${fact('הודעות', fmtNum(data.backups.reduce((a, b) => a + b.count, 0)))}
+          ${fact('קבוצה ראשית', u.hasControl ? '✅ קיימת' : '❌ אין')}
+          ${fact('רשימה בוואטסאפ', { active: '✅ פעילה', deleted: '🚫 נמחקה ע״י המשתמש', none: '— עוד לא' }[u.list])}
+          ${fact('גיבוי', u.settings.paused ? '⏸️ מושהה' : '▶️ פעיל')}
+          ${fact('בקשות ממתינות', data.requests)}
+        </div>
+        <div class="field" style="margin-top:16px"><label>📝 הערה פנימית <small>(רק המנהל רואה)</small></label><textarea id="unote" class="ta" rows="2" placeholder="למשל: ביקש עזרה עם הקישור, חזר אליו ב-…">${esc(u.note)}</textarea></div>
+        <h3 class="sub-h">פעולות</h3>
+        <div class="actgrid">${USER_ACTIONS.filter(([a]) => !(a === 'pause' && u.settings.paused) && !(a === 'resume' && !u.settings.paused)).map(([a, ico, t, sub, danger]) =>
+          `<button class="act ${danger ? 'danger' : ''}" data-ua="${a}"><span class="act-ico">${ico}</span><b>${t}</b>${sub ? `<small>${sub}</small>` : ''}</button>`).join('')}</div>`
+      const note = pane.querySelector('#unote')
+      note.oninput = debounce(async () => { try { await adminRpc('adminSaveNote', { userId, note: note.value }); changed = true; toast('📝 נשמר') } catch (e) { toast(e.message) } }, 700)
+      pane.querySelectorAll('[data-ua]').forEach(b => { b.onclick = async () => {
+        const [a, , t, sub, danger] = USER_ACTIONS.find(x => x[0] === b.dataset.ua)
+        if ((danger || a === 'recreateControl' || a === 'loginAs') && !await confirmBox(`${t}?`, `${data.user.name || ''} ${fmtPhone(data.user.phone)}${sub ? ' – ' + sub : ''}`, t, danger)) return
+        b.disabled = true
+        b.classList.add('busy')
+        try {
+          const r = await adminRpc('adminUserAction', { userId, action: a })
+          changed = true
+          if (a === 'loginAs') { store.set('token', r.token); close(); toast('👤 נכנסת לממשק של המשתמש'); return go('/app') }
+          if (a === 'delete') { toast('המשתמש נמחק'); return close() }
+          toast('✅ ' + (r.message || 'בוצע'))
+          await load()
+          overview()
+        } catch (e) { toast(e.message); b.disabled = false; b.classList.remove('busy') }
+      } })
+    }
+
+    function backupsPane () {
+      pane.innerHTML = data.backups.length ? `<div class="list">${data.backups.map(b => `<div class="item wide">
+          <div class="ico">${b.kind === 'group' ? '👥' : '👤'}</div>
+          <div class="txt"><div class="name">${esc(b.name)}</div><div class="meta">${fmtNum(b.count)} הודעות · ${b.links} קישורים · מ-${new Date(b.createdAt).toLocaleDateString('he-IL')}</div></div>
+          <div class="acts"><span class="switch"><input type="checkbox" data-bact="${b.id}" ${b.active ? 'checked' : ''}><span></span></span>
+          <button class="btn small danger" data-brm="${b.id}">✕</button></div></div>`).join('')}</div>`
+        : '<div class="empty"><div class="e">📭</div>אין גיבויים</div>'
+      pane.querySelectorAll('[data-bact]').forEach(x => { x.onchange = async () => {
+        try { await adminRpc('adminBackupAction', { userId, backupId: x.dataset.bact, action: x.checked ? 'resume' : 'pause' }); changed = true; toast(x.checked ? '▶️ חודש' : '⏸️ הושהה') } catch (e) { toast(e.message); x.checked = !x.checked }
+      } })
+      pane.querySelectorAll('[data-brm]').forEach(x => { x.onclick = async () => {
+        const b = data.backups.find(y => y.id == x.dataset.brm)
+        if (!await confirmBox(`להסיר את הגיבוי של "${b.name}"?`, 'קבוצת ה(הודעות) נשארת אצל המשתמש.', 'הסרה', true)) return
+        try { await adminRpc('adminBackupAction', { userId, backupId: b.id, action: 'remove' }); changed = true; await load(); backupsPane(); toast('הוסר') } catch (e) { toast(e.message) }
+      } })
+    }
+
+    function log () {
+      pane.innerHTML = `<div class="timeline">${data.events.length ? data.events.map(e => eventRow(e)).join('') : '<div class="empty">עוד אין אירועים</div>'}</div>`
+    }
+
+    function msg () {
+      pane.innerHTML = `<p class="hint">ההודעה תישלח לקבוצה הראשית של המשתמש, בכותרת "הודעה מצוות אל-מחיק".</p>
+        <textarea id="umsg" class="ta" rows="5" placeholder="היי! ראינו ש…"></textarea>
+        <button class="cta block" id="usend" style="margin-top:12px">שליחה</button>`
+      const ta = pane.querySelector('#umsg')
+      pane.querySelector('#usend').onclick = async () => {
+        if (!ta.value.trim()) return toast('כתבו הודעה')
+        try { await adminRpc('adminMessage', { userId, text: ta.value }); ta.value = ''; toast('📣 נשלח'); changed = true } catch (e) { toast(e.message) }
+      }
+    }
+
+    try { await load(); setTab('overview') } catch (e) { pane.innerHTML = `<div class="err">${esc(e.message)}</div>` }
+  }, { tall: true, onClose: () => { if (changed) onChange() } })
+}
+
 // ---------------- admin ----------------
 async function admin () {
   if (!store.get('adminToken')) {
@@ -981,6 +1109,8 @@ async function admin () {
   }
   $app.innerHTML = '<div class="page center"><div class="spinner"></div></div>'
   let d = await adminRpc('adminOverview')
+  let uq = ''
+  let ufilter = 'all'
   const MODES = { open: 'פתוח לכולם', limit: 'עם תקרה', invite: 'קוד הזמנה', closed: 'סגור' }
   const draw = () => {
     const s = d.settings
@@ -1028,13 +1158,21 @@ async function admin () {
       </div>
 
       <div class="card">
-        <h2>משתמשים</h2>
-        ${d.users.length ? `<div class="table-wrap"><table class="table"><thead><tr><th>משתמש</th><th>מצב</th><th>גיבויים</th><th>הודעות</th><th>הצטרף</th><th></th></tr></thead><tbody>
-          ${d.users.map(u => `<tr><td data-l="משתמש"><b>${esc(u.name || '—')}</b><br><span class="muted ltr">${esc(fmtPhone(u.phone))}</span></td>
-            <td data-l="מצב"><span class="status ${esc(u.status)}">${STATUS[u.status] || esc(u.status)}</span></td>
-            <td data-l="גיבויים">${u.backups}</td><td data-l="הודעות">${fmtNum(u.messages)}</td><td data-l="הצטרף" class="muted">${new Date(u.createdAt).toLocaleDateString('he-IL')}</td>
-            <td class="acts-cell"><div class="row" style="gap:6px;flex-wrap:nowrap"><button class="btn small" data-act="restart" data-u="${u.id}" title="הפעלה מחדש">↻</button><button class="btn small" data-act="disconnect" data-u="${u.id}" title="ניתוק">⏏</button><button class="btn small danger" data-act="delete" data-u="${u.id}" title="מחיקה">🗑</button></div></td></tr>`).join('')}
-        </tbody></table></div>` : '<div class="empty"><div class="e">🌱</div>עוד אין משתמשים</div>'}
+        <div class="card-head"><h2>משתמשים <span class="badge">${d.users.length}</span></h2></div>
+        <input type="search" id="usearch" placeholder="🔎 חיפוש לפי שם או טלפון" value="${esc(uq)}" autocomplete="off">
+        <div class="chips ufilters">${Object.entries(UFILTERS).map(([k, [t]]) => `<button class="chip ${ufilter === k ? 'on' : ''}" data-uf="${k}">${t} <span class="cnt">${d.users.filter(UFILTERS[k][1]).length}</span></button>`).join('')}</div>
+        <div class="list" id="ulist"></div>
+      </div>
+
+      <div class="card">
+        <h2>📣 הודעה לכל המשתמשים</h2><p class="hint">תישלח לקבוצה הראשית של כל משתמש מחובר</p>
+        <textarea id="bcast" rows="3" class="ta" placeholder="למשל: שדרגנו את הגיבוי של סרטונים 🎬"></textarea>
+        <button class="cta block" id="bsend" style="margin-top:12px">שליחה לכולם</button>
+      </div>
+
+      <div class="card">
+        <h2>🕓 מה קרה לאחרונה</h2>
+        <div class="timeline">${d.events.length ? d.events.map(e => eventRow(e, true)).join('') : '<div class="empty">עוד אין אירועים</div>'}</div>
       </div>
 
       <div class="card">
@@ -1067,13 +1205,27 @@ async function admin () {
       e.preventDefault()
       try { await adminRpc('adminSaveSettings', { settings: { adminUser: document.getElementById('au').value, newPassword: document.getElementById('ap').value } }); toast('💾 עודכן') } catch (err) { toast(err.message) }
     }
-    $app.querySelectorAll('[data-act]').forEach(b => { b.onclick = async () => {
-      const u = d.users.find(x => x.id === b.dataset.u)
-      const labels = { restart: ['להפעיל מחדש את החיבור?', 'הפעלה מחדש', false], disconnect: ['לנתק את המשתמש מוואטסאפ?', 'ניתוק', true], delete: ['למחוק את המשתמש לגמרי?', 'מחיקה', true] }
-      const [title, ok, danger] = labels[b.dataset.act]
-      if (!await confirmBox(title, `${u.name || ''} ${fmtPhone(u.phone)}`, ok, danger)) return
-      try { await adminRpc('adminUserAction', { userId: u.id, action: b.dataset.act }); d = await adminRpc('adminOverview'); draw(); toast('בוצע') } catch (e) { toast(e.message) }
-    } })
+    const ulist = document.getElementById('ulist')
+    const drawUsers = () => {
+      const q = uq.trim().toLowerCase()
+      const digits = q.replace(/\D/g, '').replace(/^0/, '')
+      const list = d.users.filter(UFILTERS[ufilter][1]).filter(u => !q || (u.name || '').toLowerCase().includes(q) || (digits && u.phone.includes(digits)))
+      ulist.innerHTML = list.length ? list.map(u => `<button class="item urow" data-user="${u.id}">
+          <div class="ico initial">${esc((u.name || '#').trim()[0])}</div>
+          <div class="txt"><div class="name">${esc(u.name || fmtPhone(u.phone))} ${u.note ? '<span title="יש הערה">📝</span>' : ''}</div>
+            <div class="meta"><span class="status ${esc(u.status)}">${STATUS[u.status] || esc(u.status)}</span> · <span class="ltr">${esc(fmtPhone(u.phone))}</span> · ${u.backups} גיבויים${u.paused ? ' · ⏸️' : ''}${u.requests ? ` · 🙋 ${u.requests}` : ''}</div></div>
+          <span class="chev">‹</span></button>`).join('') : `<div class="empty">${d.users.length ? 'לא נמצא משתמש 🤷' : '<div class="e">🌱</div>עוד אין משתמשים'}</div>`
+      ulist.querySelectorAll('[data-user]').forEach(el => { el.onclick = () => openUser(el.dataset.user, async () => { d = await adminRpc('adminOverview'); draw() }) })
+    }
+    drawUsers()
+    document.getElementById('usearch').oninput = e => { uq = e.target.value; drawUsers() }
+    $app.querySelectorAll('[data-uf]').forEach(b => { b.onclick = () => { ufilter = b.dataset.uf; $app.querySelectorAll('[data-uf]').forEach(x => x.classList.toggle('on', x === b)); drawUsers() } })
+    document.getElementById('bsend').onclick = async () => {
+      const text = document.getElementById('bcast').value.trim()
+      if (!text) return toast('כתבו הודעה')
+      if (!await confirmBox('לשלוח לכל המשתמשים?', text.slice(0, 140), 'שליחה')) return
+      try { const r = await adminRpc('adminMessage', { text }); toast(`📣 נשלח ל-${r.sent} משתמשים`); document.getElementById('bcast').value = '' } catch (e) { toast(e.message) }
+    }
   }
   draw()
 }
