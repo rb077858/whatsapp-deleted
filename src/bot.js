@@ -201,81 +201,16 @@ export class Bot extends EventEmitter {
   }
 
   /**
-   * Puts the main group and every backup group in one WhatsApp list.
-   * On a full run it first reads the lists that really exist in the account, reuses a list
-   * with the bot's name, and creates ours in the same format as the user's own lists –
-   * including WhatsApp's list-order record, which the phone uses to show lists.
-   * `force` brings the list back even after the user deleted it (admin action).
+   * Adding chats to a WhatsApp list means writing app-state ("syncd") patches from outside the phone.
+   * A patch that doesn't match the phone's state makes WhatsApp log out every linked device
+   * ("Your devices were logged out due to an unexpected issue"), so the bot never writes app state.
+   * Users can create the list themselves; the admin can still inspect lists read-only.
    */
-  async ensureList (force = false, full = true) {
-    if (!this.sock || this.status !== 'open') return
-    try {
-      return await this.syncList(force, full)
-    } catch (e) {
-      this.log('list error:', e.message)
-      events.add(this.userId, 'list_error', `שגיאה ברשימה: ${e.message}`)
-      throw e
-    }
-  }
-
-  async syncList (force, full) {
-    let id = this.user.list_id
-    if (id === '-' && !force) return
-    const jids = [this.user.control_jid, ...backups.list(this.userId).map(b => b.backup_jid)].filter(Boolean)
-    if (!full && id && id !== '-') {
-      for (const jid of jids) if (!listMembers.has(this.userId, jid)) await this.labelChat(jid, id)
-      return
-    }
-    const scan = await this.scanLists()
-    const live = scan.lists.filter(l => !l.deleted)
-    let mine = live.find(l => l.id === id) || live.find(l => l.name.trim() === BOT_NAME)
-    if (!mine) {
-      // model the new list on a list the user made in WhatsApp, if there is one
-      const model = live.find(l => l.type === 'CUSTOM')
-      const used = scan.lists.map(l => Number(l.id)).filter(Number.isFinite)
-      const newId = String(used.length ? Math.max(...used) + 1 : 1000 + Math.floor(Math.random() * 9000))
-      const orderIndex = Math.max(0, ...live.map(l => Number(l.orderIndex) || 0)) + 1
-      await this.sock.appPatch({
-        syncAction: { labelEditAction: { name: BOT_NAME, color: model?.color ?? 4, type: proto.SyncActionValue.LabelEditAction.ListType.CUSTOM, isActive: true, orderIndex } },
-        index: ['label_edit', newId],
-        type: model?.collection || 'regular',
-        apiVersion: model?.apiVersion || 3,
-        operation: proto.SyncdMutation.SyncdOperation.SET
-      })
-      mine = { id: newId, members: [] }
-      labels.upsert(this.userId, { id: newId, name: BOT_NAME, deleted: false })
-      events.add(this.userId, 'list', `נוצרה רשימה בוואטסאפ (מזהה ${newId}${model ? ', לפי רשימה קיימת' : ''})`)
-    }
-    if (mine.id !== this.user.list_id) {
-      users.update(this.userId, { list_id: mine.id })
-      listMembers.clear(this.userId)
-    }
-    // the phone shows lists in the order kept in labelReorderingAction: make sure ours is there
-    if (scan.order && !scan.order.ids.includes(mine.id)) {
-      await this.sock.appPatch({
-        syncAction: { labelReorderingAction: { sortedLabelIds: [...scan.order.ids, mine.id].map(Number) } },
-        index: scan.order.index,
-        type: scan.order.collection,
-        apiVersion: scan.order.apiVersion || 3,
-        operation: proto.SyncdMutation.SyncdOperation.SET
-      })
-      events.add(this.userId, 'list', 'הרשימה נוספה לסדר הרשימות בוואטסאפ')
-    }
-    const inList = new Set(mine.members || [])
-    for (const jid of jids) {
-      if (inList.has(jid)) listMembers.add(this.userId, jid)
-      else await this.labelChat(jid, mine.id)
-    }
-  }
+  async ensureList () {}
 
   scanLists () { return scanLists(this.sock, this.keys) }
 
-  async labelChat (jid, id) {
-    await this.sock.addChatLabel(jid, id)
-    listMembers.add(this.userId, jid)
-  }
-
-  /** For the admin: what WhatsApp really has, to understand list problems. */
+  /** For the admin: the lists in the account, read-only. */
   async diagnoseLists () {
     if (!this.sock || this.status !== 'open') throw new Error('הוואטסאפ לא מחובר כרגע')
     const scan = await this.scanLists()

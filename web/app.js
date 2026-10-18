@@ -358,6 +358,8 @@ function landing () {
 async function join () {
   const params = new URLSearchParams(location.search)
   let invite = params.get('invite') || ''
+  // reconnecting an account that already exists: no invite code, the backups are kept
+  let relink = params.get('relink') === '1'
   let method = isMobile ? 'code' : 'qr'
   let joinRef = null
   let offJoin = null
@@ -373,8 +375,8 @@ async function join () {
 
   const shell = (body) => {
     $app.innerHTML = `<div class="wrap narrow page">
-      <h1>הצטרפות</h1>
-      <p class="lead">מחברים את הוואטסאפ כ"מכשיר מקושר" – כמו וואטסאפ ווב. לוקח חצי דקה.</p>
+      <h1>${relink ? 'חיבור מחדש' : 'הצטרפות'}</h1>
+      <p class="lead">${relink ? 'מחברים שוב את אותו מספר וואטסאפ. כל הגיבויים וההגדרות שלכם נשמרו 💚' : 'מחברים את הוואטסאפ כ"מכשיר מקושר" – כמו וואטסאפ ווב. לוקח חצי דקה.'}</p>
       <div class="card" id="joincard">${body}</div>
     </div>`
     return document.getElementById('joincard')
@@ -394,10 +396,10 @@ async function join () {
     card.querySelector('#rl').onclick = () => { if (server.online === null) store.set('lp', '1'); location.reload() }
     return
   }
-  if (st.full) {
+  if (st.full && !relink) {
     shell(`<h2>${st.regMode === 'closed' ? '🚪 ההרשמה סגורה כרגע' : '🙈 כל המקומות תפוסים'}</h2><p class="hint">כבר רשומים? אפשר <a href="/login" data-link>להיכנס</a> או לחבר מחדש את אותו המספר.</p>
       <button class="btn" id="anyway">חיבור מחדש של מספר קיים</button>`)
-    document.getElementById('anyway').onclick = () => chooseMethod()
+    document.getElementById('anyway').onclick = () => { relink = true; chooseMethod() }
     return
   }
 
@@ -433,7 +435,7 @@ async function join () {
     const card = shell(`${tabs()}
       <h2>מה מספר הוואטסאפ שלכם?</h2><p class="hint">נקבל קוד של 8 תווים להזנה בוואטסאפ.</p>
       ${error ? `<div class="err">${esc(error)}</div>` : ''}
-      <form id="f"><div class="field"><input type="tel" id="ph" inputmode="tel" autocomplete="tel" placeholder="050-1234567" required></div>
+      <form id="f"><div class="field"><input type="tel" id="ph" inputmode="tel" autocomplete="tel" placeholder="050-1234567" value="${esc(params.get('phone') || '')}" required></div>
       <button class="cta block">קבלת קוד</button></form>`)
     bindTabs(card)
     card.querySelector('#f').onsubmit = e => { e.preventDefault(); startJoin({ phone: card.querySelector('#ph').value }) }
@@ -449,7 +451,7 @@ async function join () {
     // nothing from the server within 30s: don't leave the visitor staring at a spinner
     let heard = false
     const silent = setTimeout(() => { if (!heard && myRef === joinRef && !done) { store.set('lp', '1'); stopJoin(); showError('השרת לא עונה כרגע. נסו שוב.') } }, 30000)
-    setDoc(myRef, { uid, status: 'pending', method, phone: phone || '', invite, createdAt: serverTimestamp() })
+    setDoc(myRef, { uid, status: 'pending', method, phone: phone || '', invite, ...(relink ? { relink: true } : {}), createdAt: serverTimestamp() })
       .catch(e => { clearTimeout(silent); if (myRef === joinRef) showError('לא הצלחתי להתחיל חיבור: ' + e.message) })
     offJoin = onSnapshot(myRef, s => {
       if (myRef !== joinRef) return
@@ -517,7 +519,7 @@ async function join () {
       <a class="cta block" href="/app" data-link>לממשק הניהול ←</a></div>`)
   }
 
-  if (st.regMode !== 'invite') chooseMethod()
+  if (st.regMode !== 'invite' || relink) chooseMethod()
   else if (invite && invite === verifiedInvite) chooseMethod()
   else if (invite) verifyInvite(invite)
   else askInvite()
@@ -592,7 +594,11 @@ async function dashboard () {
     const total = data.backups.reduce((a, b) => a + b.count, 0)
     const sw = (key, label, small, val) => `<label class="toggle"><span class="t">${label}${small ? `<small>${small}</small>` : ''}</span><span class="switch"><input type="checkbox" data-s="${key}" ${val ? 'checked' : ''}><span></span></span></label>`
     $app.innerHTML = `<div class="wrap page" style="max-width:760px">
-      ${u.status === 'logged_out' ? '<div class="err">הוואטסאפ התנתק מהשירות. <a href="/join" data-link>לחיבור מחדש ←</a></div>' : ''}
+      ${u.status === 'logged_out' ? `<div class="card relink-card">
+        <h2>🔌 הוואטסאפ התנתק</h2>
+        <p class="hint">זה יכול לקרות כשוואטסאפ מנתק מכשירים מקושרים. כל הגיבויים וההגדרות שלכם נשמרו – רק צריך לחבר שוב את אותו המספר.</p>
+        <a class="cta block" href="/join?relink=1&phone=${encodeURIComponent(fmtPhone(u.phone))}" data-link>חיבור מחדש ←</a>
+      </div>` : ''}
       ${settings.paused ? '<div class="ok">⏸️ הגיבוי מושהה כרגע. אפשר לחדש בהגדרות למטה.</div>' : ''}
       <div class="dash-head">
         <div class="avatar">🧽</div>
@@ -645,8 +651,8 @@ async function dashboard () {
       </div>
 
       <div class="card">
-        <h2>החשבון</h2><p class="hint">הניתוק מסיר את החיבור מהוואטסאפ. קבוצות ה(הודעות) נשארות אצלכם.</p>
-        <div class="row"><button class="btn" id="logout">יציאה מהממשק</button><button class="btn danger" id="disconnect">ניתוק הוואטסאפ מהשירות</button></div>
+        <h2>החשבון</h2><p class="hint">הניתוק מסיר את החיבור מהוואטסאפ ושומר את הגיבויים לחיבור הבא. מחיקה מוחקת הכל מהשרת. בשני המקרים קבוצות ה(הודעות) נשארות אצלכם בוואטסאפ.</p>
+        <div class="row"><button class="btn" id="logout">יציאה מהממשק</button><button class="btn danger" id="disconnect">ניתוק הוואטסאפ</button><button class="btn danger" id="delacc">🗑 מחיקת החשבון</button></div>
       </div>
     </div>`
 
@@ -677,6 +683,10 @@ async function dashboard () {
       saveSettings()
     }
     document.getElementById('logout').onclick = async () => { await rpc('logout', {}, store.get('token')).catch(() => {}); store.set('token', null); go('/') }
+    document.getElementById('delacc').onclick = async () => {
+      if (!await confirmBox('למחוק את החשבון?', 'הוואטסאפ יתנתק, וכל ההגדרות, רשימת הגיבויים והקישורים יימחקו מהשרת. אי אפשר לבטל. הקבוצות בוואטסאפ נשארות אצלכם.', 'מחיקה לצמיתות', true)) return
+      try { await userRpc('deleteAccount'); store.set('token', null); toast('החשבון נמחק. להתראות 👋'); go('/') } catch (e) { toast(e.message) }
+    }
     document.getElementById('disconnect').onclick = async () => {
       if (!await confirmBox('לנתק את הוואטסאפ?', 'הגיבוי ייעצר והחיבור יוסר מהמכשירים המקושרים. אפשר להצטרף שוב בכל רגע.', 'ניתוק', true)) return
       try { await userRpc('disconnect'); store.set('token', null); toast('נותקתם. להתראות 👋'); go('/') } catch (e) { toast(e.message) }
@@ -977,9 +987,9 @@ function ago (ts) {
 const eventRow = (e, withWho) => `<div class="tl"><span class="tl-ico">${EVENT_ICONS[e.type] || '•'}</span><div class="tl-txt">${withWho && e.who ? `<b>${esc(e.who)}</b> · ` : ''}${esc(e.text)}<small>${ago(e.ts)}</small></div></div>`
 
 const USER_ACTIONS = [
+  ['relink', '🔌', 'חיבור מחדש בקוד', 'קוד בן 8 תווים לשלוח למשתמש', false],
   ['recreateControl', '🏠', 'קבוצה ראשית חדשה', 'כשהמשתמש מחק או יצא מהקבוצה', false],
-  ['diagnoseLists', '🩺', 'בדיקת רשימות', 'מה באמת יש בוואטסאפ שלו', false],
-  ['rebuildList', '📋', 'סידור הרשימה', 'מחזיר את כל הקבוצות לרשימה בוואטסאפ', false],
+  ['diagnoseLists', '🩺', 'בדיקת רשימות', 'קריאה בלבד – בלי לשנות כלום', false],
   ['relock', '🔐', 'נעילת קבוצות', 'מחיל מחדש את הרשאות הקבוצות', false],
   ['restart', '♻️', 'חיבור מחדש', 'כשהבוט לא מגיב', false],
   ['loginAs', '👤', 'כניסה כמשתמש', 'פותח את הממשק שלו (ל-24 שעות)', false],
@@ -1022,7 +1032,6 @@ function openUser (userId, onChange) {
           ${fact('גיבויים', data.backups.length)}
           ${fact('הודעות', fmtNum(data.backups.reduce((a, b) => a + b.count, 0)))}
           ${fact('קבוצה ראשית', u.hasControl ? '✅ קיימת' : '❌ אין')}
-          ${fact('רשימה בוואטסאפ', { active: '✅ פעילה', deleted: '🚫 נמחקה ע״י המשתמש', none: '— עוד לא' }[u.list])}
           ${fact('גיבוי', u.settings.paused ? '⏸️ מושהה' : '▶️ פעיל')}
           ${fact('בקשות ממתינות', data.requests)}
         </div>
@@ -1038,9 +1047,10 @@ function openUser (userId, onChange) {
         b.disabled = true
         b.classList.add('busy')
         try {
-          const r = await adminRpc('adminUserAction', { userId, action: a })
+          const r = a === 'relink' ? {} : await adminRpc('adminUserAction', { userId, action: a })
           changed = true
           if (a === 'loginAs') { store.set('token', r.token); close(); toast('👤 נכנסת לממשק של המשתמש'); return go('/app') }
+          if (a === 'relink') { b.disabled = false; b.classList.remove('busy'); return showRelink(userId, data.user, async () => { changed = true; await load(); overview() }) }
           if (a === 'diagnoseLists') { b.disabled = false; b.classList.remove('busy'); return showDiagnosis(r.diagnosis, userId) }
           if (a === 'delete') { toast('המשתמש נמחק'); return close() }
           toast('✅ ' + (r.message || 'בוצע'))
@@ -1086,6 +1096,43 @@ function openUser (userId, onChange) {
   }, { tall: true, onClose: () => { if (changed) onChange() } })
 }
 
+function showRelink (userId, user, onDone) {
+  let timer = null
+  const msgText = code => `היי! כדי לחבר שוב את אל-מחיק 🧽 לוואטסאפ שלך:\n1. וואטסאפ ← הגדרות ← מכשירים מקושרים ← קישור מכשיר\n2. "קישור באמצעות מספר טלפון"\n3. להזין את הקוד: ${code}\n\nהקוד תקף לכמה דקות. כל הגיבויים שלך נשמרו 💚`
+  modal(`<div class="card-head"><h2>🔌 חיבור מחדש</h2><button class="btn small" data-close>✕</button></div>
+    <div id="rlbody"><div class="center" style="padding:30px"><div class="spinner"></div><p class="muted" style="margin-top:12px">מבקש קוד מוואטסאפ…</p></div></div>`, async (sheet) => {
+    const body = sheet.querySelector('#rlbody')
+    const fail = msg => { body.innerHTML = `<div class="err">${esc(msg)}</div><button class="cta block" id="rlretry">לנסות שוב</button>`; body.querySelector('#rlretry').onclick = start }
+    async function start () {
+      clearInterval(timer)
+      body.innerHTML = '<div class="center" style="padding:30px"><div class="spinner"></div><p class="muted" style="margin-top:12px">מבקש קוד מוואטסאפ…</p></div>'
+      let r
+      try { r = await adminRpc('adminRelink', { userId }) } catch (e) { return fail(e.message) }
+      const wa = `https://wa.me/${r.phone}?text=${encodeURIComponent(msgText(r.code))}`
+      body.innerHTML = `<p class="hint">שלחו את הקוד ל-${esc(user.name || '')} <span class="ltr">${esc(fmtPhone(r.phone))}</span>. הוא מזין אותו בוואטסאפ ← מכשירים מקושרים ← קישור באמצעות מספר טלפון.</p>
+        <div class="paircode">${esc(r.code)}</div>
+        <div class="row confirm-row"><a class="cta" href="${wa}" target="_blank" rel="noopener">💬 שליחה בוואטסאפ</a><button class="btn" id="rlcopy">📋 העתקה</button></div>
+        <div class="rl-status" id="rlstat"><span class="spinner sm"></span> ממתין שהמשתמש יזין את הקוד…</div>`
+      body.querySelector('#rlcopy').onclick = () => navigator.clipboard?.writeText(msgText(r.code)).then(() => toast('📋 ההודעה הועתקה'))
+      timer = setInterval(async () => {
+        if (!document.body.contains(body)) return clearInterval(timer)
+        const s = await adminRpc('adminRelinkStatus', { userId }).catch(() => null)
+        if (!s) return
+        if (s.status === 'connected') {
+          clearInterval(timer)
+          body.querySelector('#rlstat').innerHTML = '✅ <b>מחובר!</b> הגיבוי חזר לפעול.'
+          body.querySelector('#rlstat').classList.add('done')
+          onDone()
+        } else if (s.status === 'error') {
+          clearInterval(timer)
+          fail(s.error || 'החיבור נכשל')
+        }
+      }, 3000)
+    }
+    start()
+  }, { onClose: () => clearInterval(timer) })
+}
+
 function showDiagnosis (dg, userId) {
   const mine = dg.lists.find(l => !l.deleted && (l.id === dg.ourId || l.name.trim() === dg.botName))
   const inside = mine ? dg.expected.filter(j => mine.members.includes(j)).length : 0
@@ -1094,7 +1141,7 @@ function showDiagnosis (dg, userId) {
   const report = () => `<div class="dg-sum">
       ${row(!!mine, mine ? `הרשימה "${esc(mine.name)}" קיימת (מזהה ${esc(mine.id)}, ${esc(String(mine.type))})` : 'הרשימה של הבוט לא קיימת בוואטסאפ')}
       ${mine ? row(inside === dg.expected.length, `${inside} מתוך ${dg.expected.length} הקבוצות נמצאות בה`) : ''}
-      ${mine ? row(!dg.order || pos >= 0, dg.order ? (pos >= 0 ? `מופיעה בסדר הרשימות (מקום ${pos + 1})` : 'לא מופיעה בסדר הרשימות – ייתכן שבגלל זה הטלפון לא מציג אותה') : 'אין רשומת סדר רשימות בחשבון') : ''}
+      ${mine ? row(!dg.order || pos >= 0, dg.order ? (pos >= 0 ? `מופיעה בסדר הרשימות (מקום ${pos + 1})` : 'לא מופיעה בסדר הרשימות') : 'אין רשומת סדר רשימות בחשבון') : ''}
       ${Object.keys(dg.errors).length ? row(false, 'שגיאות בקריאה: ' + esc(JSON.stringify(dg.errors))) : ''}
     </div>
     <h3 class="sub-h">כל הרשימות בחשבון (${dg.lists.length})</h3>
@@ -1104,20 +1151,9 @@ function showDiagnosis (dg, userId) {
     ${dg.order ? `<p class="muted ltr" style="margin-top:10px">order: ${esc(dg.order.ids.join(', '))} (${esc(dg.order.collection)})</p>` : ''}`
   modal(`<div class="card-head"><h2>🩺 בדיקת רשימות</h2><button class="btn small" data-close>✕</button></div>
     <div id="dgbody">${report()}</div>
-    <div class="row confirm-row" style="margin-top:16px"><button class="cta" id="dgfix">🔧 תיקון אוטומטי</button><button class="btn" id="dgcopy">📋 העתקת הנתונים</button></div>`, (sheet) => {
+    <p class="muted" style="margin-top:12px">הבוט לא משנה רשימות בוואטסאפ: כתיבה כזו מבחוץ גורמת לוואטסאפ לנתק את כל המכשירים המקושרים.</p>
+    <div class="row confirm-row" style="margin-top:12px"><button class="btn" id="dgcopy">📋 העתקת הנתונים</button></div>`, (sheet) => {
     sheet.querySelector('#dgcopy').onclick = () => navigator.clipboard?.writeText(JSON.stringify(dg, null, 1)).then(() => toast('📋 הנתונים הועתקו'))
-    sheet.querySelector('#dgfix').onclick = async e => {
-      e.target.disabled = true
-      e.target.textContent = 'מתקן…'
-      try {
-        const r = await adminRpc('adminUserAction', { userId, action: 'fixList' })
-        dg = r.diagnosis
-        sheet.querySelector('#dgbody').innerHTML = report()
-        toast('✅ ' + r.message)
-      } catch (err) { toast(err.message) }
-      e.target.disabled = false
-      e.target.textContent = '🔧 תיקון אוטומטי'
-    }
   }, { tall: true })
 }
 

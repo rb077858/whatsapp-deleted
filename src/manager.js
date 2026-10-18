@@ -52,9 +52,11 @@ export function registrationError (invite, phone) {
  * Starts a pairing session (QR or phone-number code).
  * `update(fields)` is called whenever there is something new to show the user.
  */
-export async function startJoin (joinId, { method, phone, invite }, update) {
+export async function startJoin (joinId, { method, phone, invite, relink }, update) {
   if (joins.size >= MAX_PENDING_JOINS) return update({ status: 'error', error: 'יש עומס כרגע, נסו שוב בעוד דקה.' })
-  const err = registrationError(invite, phone)
+  // reconnecting an existing account skips the sign-up rules here; they are enforced
+  // again once WhatsApp tells us which number was linked (see finalize)
+  const err = relink ? null : registrationError(invite, phone)
   if (err) return update({ status: 'error', error: err })
 
   const dir = path.join(PENDING_DIR, joinId)

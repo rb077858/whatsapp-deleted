@@ -1,5 +1,5 @@
 import { events, links, joinRequests, users, backups, sessions, loginCodes, kvGet, kvSet, normalizePhone, randomCode, sha, checkPassword, hashPassword } from './db.js'
-import { bots, startBot, stopBot, registrationError } from './manager.js'
+import { bots, startBot, stopBot, registrationError, startJoin, cancelJoin } from './manager.js'
 import { mergeSettings, BOT_NAME, TYPE_LABELS } from './config.js'
 import * as T from './text.js'
 import { memory, skipped } from './guard.js'
@@ -8,6 +8,7 @@ import { publicLinkInfo, joinByLink, decideRequest, linkView, linkFields } from 
 export class ApiError extends Error {}
 const inviteFailures = []
 const linkTries = new Map()
+const relinks = new Map() // userId -> { status, code, error, joinId, at }
 const fail = msg => { throw new ApiError(msg) }
 
 function requireUser (token) {
@@ -225,6 +226,17 @@ export const handlers = {
     return { settings: s }
   },
 
+  /** The user deletes their account: unlink WhatsApp and remove everything stored about them. */
+  async deleteAccount ({ token }) {
+    const user = requireUser(token)
+    const bot = bots.get(user.id)
+    if (bot) await bot.logout()
+    bots.delete(user.id)
+    users.remove(user.id)
+    events.add(null, 'deleted', `${user.name || user.phone} מחק/ה את החשבון`)
+    return {}
+  },
+
   async disconnect ({ token }) {
     const user = requireUser(token)
     const bot = bots.get(user.id)
@@ -318,10 +330,6 @@ export const handlers = {
         for (const b of backups.list(user.id)) await live().lockGroup(b.backup_jid)
         log('המנהל נעל מחדש את קבוצות הגיבוי')
         return { message: 'ההרשאות עודכנו בכל הקבוצות' }
-      case 'rebuildList':
-        await live().ensureList(true)
-        log('המנהל סידר מחדש את הרשימה בוואטסאפ')
-        return { message: 'הרשימה בוואטסאפ סודרה' }
       case 'pause':
       case 'resume':
         users.update(user.id, { settings: { ...user.settings, paused: action === 'pause' } })
@@ -333,15 +341,44 @@ export const handlers = {
         return { message: 'ההגדרות אופסו' }
       case 'diagnoseLists':
         return { diagnosis: await live().diagnoseLists() }
-      case 'fixList':
-        await live().ensureList(true)
-        return { message: 'הרשימה נבדקה ותוקנה', diagnosis: await live().diagnoseLists() }
       case 'loginAs':
         log('המנהל נכנס לממשק של המשתמש')
         return { token: sessions.create(user.id, 'user', 1) }
       default:
         fail('פעולה לא מוכרת.')
     }
+  },
+
+  /**
+   * Customer service: reconnect a user whose WhatsApp got unlinked, keeping the same account.
+   * Returns an 8-character pairing code for the admin to send to the user.
+   */
+  async adminRelink ({ token, userId }) {
+    requireAdmin(token)
+    const user = users.get(userId) || fail('משתמש לא נמצא.')
+    const prev = relinks.get(user.id)
+    if (prev?.joinId && ['starting', 'code'].includes(prev.status)) cancelJoin(prev.joinId)
+    const joinId = `relink-${user.id}-${Date.now()}`
+    const state = { status: 'starting', joinId, at: Date.now() }
+    relinks.set(user.id, state)
+    events.add(user.id, 'admin', 'המנהל יצר קוד לחיבור מחדש')
+    await new Promise(resolve => {
+      const timer = setTimeout(resolve, 25000)
+      startJoin(joinId, { method: 'code', phone: user.phone, relink: true }, fields => {
+        Object.assign(state, fields)
+        if (fields.status === 'connected') events.add(user.id, 'joined', 'חובר מחדש בעזרת קוד מהמנהל')
+        if (['code', 'error', 'connected'].includes(fields.status)) { clearTimeout(timer); resolve() }
+      })
+    })
+    if (state.status === 'error') fail(state.error)
+    if (state.status !== 'code') fail('לא הצלחתי לקבל קוד מוואטסאפ. נסו שוב.')
+    return { code: state.code, phone: user.phone }
+  },
+
+  adminRelinkStatus ({ token, userId }) {
+    requireAdmin(token)
+    const s = relinks.get(String(userId))
+    return s ? { status: s.status, code: s.code || null, error: s.error || null } : { status: 'none' }
   },
 
   async adminBackupAction ({ token, userId, backupId, action }) {
