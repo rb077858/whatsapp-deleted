@@ -177,6 +177,12 @@ const adminRpc = (op, args) => rpc(op, args, store.get('adminToken')).catch(e =>
 const pushSupported = () => 'serviceWorker' in navigator && 'PushManager' in window && 'Notification' in window
 const isIOS = /iPhone|iPad|iPod/.test(navigator.userAgent)
 const isStandalone = () => matchMedia('(display-mode: standalone)').matches || navigator.standalone === true
+// pages opened inside an Android app (like Run on Phone's buttons) run in a WebView, which has no push
+const isWebView = /; wv\)/.test(navigator.userAgent)
+const chromeIntent = () => `intent://${location.host}${location.pathname}#Intent;scheme=https;package=com.android.chrome;end`
+const ALLOW_HELP = /Android/.test(navigator.userAgent)
+  ? 'ב-Chrome: לחצו על הסמל שמשמאל לכתובת האתר (🔒 או ⚙️) ← <b>הרשאות</b> ← <b>התראות</b> ← <b>אישור</b>, ואז הדליקו שוב את המתג.'
+  : 'לחצו על סמל המנעול 🔒 ליד כתובת האתר ← <b>התראות</b> ← <b>אישור</b>, ואז הדליקו שוב את המתג.'
 if ('serviceWorker' in navigator) navigator.serviceWorker.register('/sw.js').catch(() => {})
 
 function b64ToBytes (b64) {
@@ -194,15 +200,33 @@ async function currentSub () {
   const reg = await navigator.serviceWorker.getRegistration('/')
   return reg ? reg.pushManager.getSubscription() : null
 }
-async function enablePush (call) {
-  const perm = await Notification.requestPermission()
-  if (perm !== 'granted') throw new RpcError(perm === 'denied' ? 'ההתראות חסומות לאתר הזה. אפשר לאפשר אותן בהגדרות האתר בדפדפן (🔒 ליד הכתובת).' : 'לא אישרתם התראות.')
+/**
+ * `onWait(stage)` reports progress, so the card never sits silently:
+ * 'asking' (browser prompt open), 'slow' (no prompt answer after a while), 'subscribing'.
+ */
+async function enablePush (call, onWait = () => {}) {
+  let perm = Notification.permission
+  if (perm !== 'granted') {
+    onWait('asking')
+    // Chrome's "quiet" mode shows no popup – only a small icon by the address bar – and the
+    // promise waits for the user; tell them where to look instead of doing nothing.
+    const slow = setTimeout(() => onWait('slow'), 6000)
+    perm = await Notification.requestPermission().finally(() => clearTimeout(slow))
+  }
+  if (perm !== 'granted') throw new RpcError(perm === 'denied' ? 'ההתראות חסומות לאתר הזה בדפדפן.' : 'לא אישרתם התראות.')
+  onWait('subscribing')
   await navigator.serviceWorker.register('/sw.js')
-  const reg = await navigator.serviceWorker.ready
+  const reg = await withTimeout(navigator.serviceWorker.ready, 15000, 'הדפדפן לא הצליח להפעיל את רכיב ההתראות. נסו לרענן את הדף.')
   const { key } = await rpc('pushKey')
   const subscribe = () => reg.pushManager.subscribe({ userVisibleOnly: true, applicationServerKey: b64ToBytes(key) })
   let sub = await reg.pushManager.getSubscription()
-  try { if (!sub) sub = await subscribe() } catch { await sub?.unsubscribe(); sub = await subscribe() }
+  try {
+    if (!sub) sub = await withTimeout(subscribe(), 20000, 'שירות ההתראות של הדפדפן לא עונה. נסו שוב בעוד רגע.')
+  } catch (e) {
+    if (/permission|incognito|private/i.test(e.message)) throw new RpcError('הדפדפן הזה לא מאפשר התראות (למשל בגלישה בסתר).')
+    await sub?.unsubscribe()
+    sub = await withTimeout(subscribe(), 20000, 'שירות ההתראות של הדפדפן לא עונה. נסו שוב בעוד רגע.')
+  }
   try {
     await call('pushSubscribe', { sub: sub.toJSON(), device: deviceName() })
   } catch (e) {
@@ -226,6 +250,11 @@ async function disablePush (call) {
 function mountPushCard (el, call, { title, hint, kinds = [], settings, onSettings } = {}) {
   let busy = false
   const draw = async () => {
+    if (isWebView || (!pushSupported() && /Android/.test(navigator.userAgent))) {
+      el.innerHTML = `<h2>${title}</h2><p class="hint">הדף פתוח בתוך אפליקציה, ושם אי אפשר לקבל התראות. פתחו אותו ב-Chrome:</p>
+        <a class="cta block" href="${chromeIntent()}">פתיחה ב-Chrome ←</a>`
+      return
+    }
     if (!pushSupported()) {
       el.innerHTML = `<h2>${title}</h2><p class="hint">${isIOS && !isStandalone() ? 'באייפון, התראות עובדות רק מהאפליקציה: לחצו על <b>שיתוף ⬆️</b> ← <b>הוספה למסך הבית</b>, ופתחו את אל-מחיק משם.' : 'הדפדפן הזה לא תומך בהתראות. נסו Chrome.'}</p>`
       return
@@ -235,16 +264,36 @@ function mountPushCard (el, call, { title, hint, kinds = [], settings, onSetting
     const on = !!(sub && st.subscribed && Notification.permission === 'granted')
     el.innerHTML = `<div class="card-head" style="margin-bottom:6px"><div><h2>${title}</h2><p class="muted">${hint}</p></div>
         <span class="switch"><input type="checkbox" id="pushsw" ${on ? 'checked' : ''} ${busy ? 'disabled' : ''}><span></span></span></div>
-      <p class="push-state ${on ? 'on' : ''}">${on ? '✅ פעיל במכשיר הזה' : Notification.permission === 'denied' ? '🚫 חסום בדפדפן – אפשר לאפשר בהגדרות האתר' : '⚪ כבוי במכשיר הזה'}${st.devices ? ` · ${st.devices} ${st.devices === 1 ? 'מכשיר' : 'מכשירים'} מקבלים התראות` : ''}</p>
+      <p class="push-state ${on ? 'on' : ''}" id="pushstate">${on ? '✅ פעיל במכשיר הזה' : Notification.permission === 'denied' ? '🚫 ההתראות חסומות לאתר הזה בדפדפן' : '⚪ כבוי במכשיר הזה'}${st.devices ? ` · ${st.devices} ${st.devices === 1 ? 'מכשיר' : 'מכשירים'} מקבלים התראות` : ''}</p>
+      ${!on && Notification.permission === 'denied' ? `<div class="push-help">${ALLOW_HELP}</div>` : ''}
       ${on && kinds.length ? kinds.map(([k, label, small]) => `<label class="toggle"><span class="t">${label}${small ? `<small>${small}</small>` : ''}</span><span class="switch"><input type="checkbox" data-pk="${k}" ${settings[k] !== false ? 'checked' : ''}><span></span></span></label>`).join('') : ''}
       ${on ? '<button class="btn small" id="pushtest" style="margin-top:12px">🔔 שליחת התראת בדיקה</button>' : ''}`
     el.querySelector('#pushsw').onchange = async e => {
       busy = true
+      e.target.disabled = true
+      const state = el.querySelector('#pushstate')
+      const say = html => { state.innerHTML = html; state.classList.add('waiting') }
+      let failed = null
       try {
-        if (e.target.checked) { await enablePush(call); toast('🔔 ההתראות הופעלו') } else { await disablePush(call); toast('ההתראות כובו במכשיר הזה') }
-      } catch (err) { toast(err.message) }
+        if (e.target.checked) {
+          await enablePush(call, stage => {
+            if (stage === 'asking') say('⏳ מחכה לאישור שלכם בחלון של הדפדפן…')
+            if (stage === 'slow') say(`🔔 לא קפץ חלון? ייתכן שהדפדפן הסתיר אותו – חפשו סמל פעמון קטן ליד כתובת האתר ולחצו עליו.<br>${ALLOW_HELP}`)
+            if (stage === 'subscribing') say('⏳ מפעיל התראות…')
+          })
+          toast('🔔 ההתראות הופעלו')
+        } else {
+          await disablePush(call)
+          toast('ההתראות כובו במכשיר הזה')
+        }
+      } catch (err) { failed = err.message }
       busy = false
-      draw()
+      await draw()
+      if (failed) {
+        toast(failed)
+        const st2 = el.querySelector('#pushstate')
+        st2.insertAdjacentHTML('afterend', `<div class="push-help">⚠️ ${esc(failed)}${/חסומות|לא אישרתם/.test(failed) ? '<br>' + ALLOW_HELP : ''}</div>`)
+      }
     }
     el.querySelector('#pushtest')?.addEventListener('click', async () => {
       try { await call('pushTest'); toast('נשלחה התראת בדיקה') } catch (err) { toast(err.message) }
