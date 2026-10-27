@@ -5,7 +5,6 @@ import makeWASocket, { Browsers, DisconnectReason, useMultiFileAuthState, makeCa
 import { PENDING_DIR, SESSIONS_DIR } from './config.js'
 import { users, kvGet, events } from './db.js'
 import { Bot, baileysLogger } from './bot.js'
-import { notifyUser } from './push.js'
 
 const JOIN_TIMEOUT = 3 * 60000
 const MAX_PENDING_JOINS = 3
@@ -19,6 +18,7 @@ export function startBot (userId) {
   bot = new Bot(userId)
   bots.set(userId, bot)
   bot.on('logged_out', () => bots.delete(userId))
+  bot.on('blocked', () => bots.delete(userId))
   bot.start().catch(e => bot.log('start failed', e.message))
   return bot
 }
@@ -100,11 +100,14 @@ export async function startJoin (joinId, { method, phone, invite, relink }, upda
       return update({ status: 'error', error: regErr })
     }
     let user = users.byPhone(pn)
+    if (user?.status === 'blocked') {
+      fs.rmSync(dir, { recursive: true, force: true })
+      return update({ status: 'error', error: 'החשבון הזה חסום. לבירור פנו לצוות.' })
+    }
     const returning = !!user
     if (user) await stopBot(user.id)
     else user = users.create(pn)
     events.add(user.id, 'joined', returning ? 'התחבר מחדש דרך האתר' : 'הצטרף לשירות')
-    notifyUser('admin', 'admin', { body: `${returning ? '🔌 התחבר מחדש' : '🎉 משתמש חדש'}: ${creds.me?.name || ''} ${pn.startsWith('972') ? '0' + pn.slice(3) : '+' + pn}`, url: '/admin', tag: 'admin-join-' + user.id }).catch(() => {})
     users.update(user.id, { status: 'active', name: creds.me?.name || user.name })
     const target = path.join(SESSIONS_DIR, user.id, 'auth')
     fs.rmSync(target, { recursive: true, force: true })
@@ -158,6 +161,18 @@ export async function startJoin (joinId, { method, phone, invite, relink }, upda
 
   update({ status: 'starting' })
   connect().catch(e => fail(e.message))
+}
+
+/**
+ * Posts a service update in a user's updates group. `setting` is the user setting that can
+ * turn this kind of update off (null = always). Never throws.
+ */
+export function notify (userId, setting, text) {
+  const u = users.get(userId)
+  if (!u || (setting && u.settings[setting] === false)) return Promise.resolve(false)
+  const bot = bots.get(userId)
+  if (!bot || bot.status !== 'open') return Promise.resolve(false)
+  return bot.sendUpdate(text).then(() => true, () => false)
 }
 
 export function cancelJoin (joinId) {

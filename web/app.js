@@ -173,135 +173,8 @@ const adminRpc = (op, args) => rpc(op, args, store.get('adminToken')).catch(e =>
   throw e
 })
 
-// ---------------- push notifications ----------------
-const pushSupported = () => 'serviceWorker' in navigator && 'PushManager' in window && 'Notification' in window
-const isIOS = /iPhone|iPad|iPod/.test(navigator.userAgent)
-const isStandalone = () => matchMedia('(display-mode: standalone)').matches || navigator.standalone === true
-// pages opened inside an Android app (like Run on Phone's buttons) run in a WebView, which has no push
-const isWebView = /; wv\)/.test(navigator.userAgent)
-const chromeIntent = () => `intent://${location.host}${location.pathname}#Intent;scheme=https;package=com.android.chrome;end`
-const ALLOW_HELP = /Android/.test(navigator.userAgent)
-  ? 'ב-Chrome: לחצו על הסמל שמשמאל לכתובת האתר (🔒 או ⚙️) ← <b>הרשאות</b> ← <b>התראות</b> ← <b>אישור</b>, ואז הדליקו שוב את המתג.'
-  : 'לחצו על סמל המנעול 🔒 ליד כתובת האתר ← <b>התראות</b> ← <b>אישור</b>, ואז הדליקו שוב את המתג.'
-if ('serviceWorker' in navigator) navigator.serviceWorker.register('/sw.js').catch(() => {})
-
-function b64ToBytes (b64) {
-  const s = atob((b64 + '='.repeat((4 - b64.length % 4) % 4)).replace(/-/g, '+').replace(/_/g, '/'))
-  return Uint8Array.from(s, c => c.charCodeAt(0))
-}
-function deviceName () {
-  const ua = navigator.userAgent
-  const os = /Android/.test(ua) ? 'Android' : /iPhone|iPad/.test(ua) ? 'iPhone' : /Windows/.test(ua) ? 'Windows' : /Mac/.test(ua) ? 'Mac' : 'מכשיר'
-  const br = /Edg\//.test(ua) ? 'Edge' : /SamsungBrowser/.test(ua) ? 'Samsung' : /Chrome\//.test(ua) ? 'Chrome' : /Firefox\//.test(ua) ? 'Firefox' : /Safari\//.test(ua) ? 'Safari' : ''
-  return [os, br].filter(Boolean).join(' · ')
-}
-async function currentSub () {
-  if (!pushSupported()) return null
-  const reg = await navigator.serviceWorker.getRegistration('/')
-  return reg ? reg.pushManager.getSubscription() : null
-}
-/**
- * `onWait(stage)` reports progress, so the card never sits silently:
- * 'asking' (browser prompt open), 'slow' (no prompt answer after a while), 'subscribing'.
- */
-async function enablePush (call, onWait = () => {}) {
-  let perm = Notification.permission
-  if (perm !== 'granted') {
-    onWait('asking')
-    // Chrome's "quiet" mode shows no popup – only a small icon by the address bar – and the
-    // promise waits for the user; tell them where to look instead of doing nothing.
-    const slow = setTimeout(() => onWait('slow'), 6000)
-    perm = await Notification.requestPermission().finally(() => clearTimeout(slow))
-  }
-  if (perm !== 'granted') throw new RpcError(perm === 'denied' ? 'ההתראות חסומות לאתר הזה בדפדפן.' : 'לא אישרתם התראות.')
-  onWait('subscribing')
-  await navigator.serviceWorker.register('/sw.js')
-  const reg = await withTimeout(navigator.serviceWorker.ready, 15000, 'הדפדפן לא הצליח להפעיל את רכיב ההתראות. נסו לרענן את הדף.')
-  const { key } = await rpc('pushKey')
-  const subscribe = () => reg.pushManager.subscribe({ userVisibleOnly: true, applicationServerKey: b64ToBytes(key) })
-  let sub = await reg.pushManager.getSubscription()
-  try {
-    if (!sub) sub = await withTimeout(subscribe(), 20000, 'שירות ההתראות של הדפדפן לא עונה. נסו שוב בעוד רגע.')
-  } catch (e) {
-    if (/permission|incognito|private/i.test(e.message)) throw new RpcError('הדפדפן הזה לא מאפשר התראות (למשל בגלישה בסתר).')
-    await sub?.unsubscribe()
-    sub = await withTimeout(subscribe(), 20000, 'שירות ההתראות של הדפדפן לא עונה. נסו שוב בעוד רגע.')
-  }
-  try {
-    await call('pushSubscribe', { sub: sub.toJSON(), device: deviceName() })
-  } catch (e) {
-    // the server key changed: subscribe again with the new one
-    await sub.unsubscribe()
-    sub = await subscribe()
-    await call('pushSubscribe', { sub: sub.toJSON(), device: deviceName() })
-  }
-}
-async function disablePush (call) {
-  const sub = await currentSub()
-  if (!sub) return
-  await call('pushUnsubscribe', { endpoint: sub.endpoint }).catch(() => {})
-  await sub.unsubscribe()
-}
-
-/**
- * The 🔔 card. `call` is userRpc or adminRpc; `kinds` are the per-type switches
- * (only for users): [[settingKey, label, hint]].
- */
-function mountPushCard (el, call, { title, hint, kinds = [], settings, onSettings } = {}) {
-  let busy = false
-  const draw = async () => {
-    if (isWebView || (!pushSupported() && /Android/.test(navigator.userAgent))) {
-      el.innerHTML = `<h2>${title}</h2><p class="hint">הדף פתוח בתוך אפליקציה, ושם אי אפשר לקבל התראות. פתחו אותו ב-Chrome:</p>
-        <a class="cta block" href="${chromeIntent()}">פתיחה ב-Chrome ←</a>`
-      return
-    }
-    if (!pushSupported()) {
-      el.innerHTML = `<h2>${title}</h2><p class="hint">${isIOS && !isStandalone() ? 'באייפון, התראות עובדות רק מהאפליקציה: לחצו על <b>שיתוף ⬆️</b> ← <b>הוספה למסך הבית</b>, ופתחו את אל-מחיק משם.' : 'הדפדפן הזה לא תומך בהתראות. נסו Chrome.'}</p>`
-      return
-    }
-    const sub = await currentSub().catch(() => null)
-    const st = sub ? await call('pushStatus', { endpoint: sub.endpoint }).catch(() => ({ subscribed: false, devices: 0 })) : await call('pushStatus', {}).catch(() => ({ devices: 0 }))
-    const on = !!(sub && st.subscribed && Notification.permission === 'granted')
-    el.innerHTML = `<div class="card-head" style="margin-bottom:6px"><div><h2>${title}</h2><p class="muted">${hint}</p></div>
-        <span class="switch"><input type="checkbox" id="pushsw" ${on ? 'checked' : ''} ${busy ? 'disabled' : ''}><span></span></span></div>
-      <p class="push-state ${on ? 'on' : ''}" id="pushstate">${on ? '✅ פעיל במכשיר הזה' : Notification.permission === 'denied' ? '🚫 ההתראות חסומות לאתר הזה בדפדפן' : '⚪ כבוי במכשיר הזה'}${st.devices ? ` · ${st.devices} ${st.devices === 1 ? 'מכשיר' : 'מכשירים'} מקבלים התראות` : ''}</p>
-      ${!on && Notification.permission === 'denied' ? `<div class="push-help">${ALLOW_HELP}</div>` : ''}
-      ${on && kinds.length ? kinds.map(([k, label, small]) => `<label class="toggle"><span class="t">${label}${small ? `<small>${small}</small>` : ''}</span><span class="switch"><input type="checkbox" data-pk="${k}" ${settings[k] !== false ? 'checked' : ''}><span></span></span></label>`).join('') : ''}
-      ${on ? '<button class="btn small" id="pushtest" style="margin-top:12px">🔔 שליחת התראת בדיקה</button>' : ''}`
-    el.querySelector('#pushsw').onchange = async e => {
-      busy = true
-      e.target.disabled = true
-      const state = el.querySelector('#pushstate')
-      const say = html => { state.innerHTML = html; state.classList.add('waiting') }
-      let failed = null
-      try {
-        if (e.target.checked) {
-          await enablePush(call, stage => {
-            if (stage === 'asking') say('⏳ מחכה לאישור שלכם בחלון של הדפדפן…')
-            if (stage === 'slow') say(`🔔 לא קפץ חלון? ייתכן שהדפדפן הסתיר אותו – חפשו סמל פעמון קטן ליד כתובת האתר ולחצו עליו.<br>${ALLOW_HELP}`)
-            if (stage === 'subscribing') say('⏳ מפעיל התראות…')
-          })
-          toast('🔔 ההתראות הופעלו')
-        } else {
-          await disablePush(call)
-          toast('ההתראות כובו במכשיר הזה')
-        }
-      } catch (err) { failed = err.message }
-      busy = false
-      await draw()
-      if (failed) {
-        toast(failed)
-        const st2 = el.querySelector('#pushstate')
-        st2.insertAdjacentHTML('afterend', `<div class="push-help">⚠️ ${esc(failed)}${/חסומות|לא אישרתם/.test(failed) ? '<br>' + ALLOW_HELP : ''}</div>`)
-      }
-    }
-    el.querySelector('#pushtest')?.addEventListener('click', async () => {
-      try { await call('pushTest'); toast('נשלחה התראת בדיקה') } catch (err) { toast(err.message) }
-    })
-    el.querySelectorAll('[data-pk]').forEach(x => { x.onchange = () => { settings[x.dataset.pk] = x.checked; onSettings?.() } })
-  }
-  draw()
-}
+// The push version installed a service worker; remove it from browsers that still have it.
+navigator.serviceWorker?.getRegistrations?.().then(list => list.forEach(r => r.unregister())).catch(() => {})
 
 // ---------------- router ----------------
 let cleanup = null
@@ -457,13 +330,13 @@ function landing () {
         <div class="feature"><div class="ico">📸</div><h3>כל סוגי ההודעות</h3><p>טקסט, תמונות, סרטונים, הקלטות, מסמכים, סטיקרים ומיקומים – אתם בוחרים.</p></div>
         <div class="feature"><div class="ico">🛡️</div><h3>קבוצה נעולה</h3><p>רק אתם כותבים בקבוצות הגיבוי, ואף אחד לא יכול לשנות שם, תיאור או תמונה.</p></div>
         <div class="feature"><div class="ico">🔗</div><h3>שיתוף חכם</h3><p>צרפו אחרים לקריאה בלבד – לפי מספר, או בקישור עם הגבלות ואישור שלכם.</p></div>
-        <div class="feature"><div class="ico">🔔</div><h3>התראות לטלפון</h3><p>בקשות הצטרפות לאישור, עדכונים ואזהרות – ישר לטלפון, בלי עוד קבוצה בוואטסאפ.</p></div>
+        <div class="feature"><div class="ico">📣</div><h3>קבוצת עדכונים</h3><p>בקשות הצטרפות לאישור, קודי כניסה והודעות מהצוות – בקבוצה אחת שקטה בוואטסאפ.</p></div>
         <div class="feature"><div class="ico">🔒</div><h3>רק אצלכם</h3><p>קבוצות הגיבוי פרטיות, ורק אתם בהן.</p></div>
       </div>
     </div></section>
     <section class="section"><div class="wrap narrow" style="max-width:760px">
       <h2>שאלות</h2>
-      <details><summary>הבוט יכול לשלוח הודעות בשמי לאנשים אחרים?</summary><p>הבוט כותב רק בקבוצות ה(הודעות) שלכם, ושולח לכם קוד כניסה בצ'אט "הודעה לעצמי". הוא לא כותב בקבוצות המקוריות ולא לאנשי הקשר שלכם.</p></details>
+      <details><summary>הבוט יכול לשלוח הודעות בשמי לאנשים אחרים?</summary><p>הבוט כותב רק בקבוצות ה(הודעות) שלכם, ובקבוצת העדכונים שלכם. הוא לא כותב בקבוצות המקוריות ולא לאנשי הקשר שלכם.</p></details>
       <details><summary>אפשר לראות הודעות שנמחקו לפני שהצטרפתי?</summary><p>לא. אל-מחיק שומר רק הודעות שמגיעות אחרי שהוספתם את הצ'אט לגיבוי.</p></details>
       <details><summary>מה עם "צפייה חד-פעמית"?</summary><p>תמונות וסרטונים של צפייה חד-פעמית נשמרים כמו כל מדיה אחרת, אם בחרתם לגבות את הסוג הזה.</p></details>
       <details><summary>איך מתנתקים?</summary><p>בממשק הניהול יש כפתור "ניתוק", או בוואטסאפ: הגדרות ← מכשירים מקושרים ← לבחור את המכשיר ← התנתקות. קבוצות ה(הודעות) נשארות אצלכם.</p></details>
@@ -645,7 +518,7 @@ async function join () {
   function showSuccess (name) {
     shell(`<div class="success"><div class="big-emoji">🎉</div>
       <h2>${name ? esc(name) + ', ' : ''}התחברתם!</h2>
-      <p class="hint" style="margin:10px 0 22px">עכשיו בוחרים מה לגבות, ומפעילים התראות כדי לקבל עדכונים לטלפון 🔔</p>
+      <p class="hint" style="margin:10px 0 22px">בוואטסאפ נפתחה לכם קבוצת <b>"אל-מחיק 🧽 · עדכונים"</b> – לשם יגיעו עדכונים. אסור לכתוב בה.<br>עכשיו בוחרים מה לגבות 👇</p>
       <a class="cta block" href="/app" data-link>לממשק הניהול ←</a></div>`)
   }
 
@@ -662,7 +535,7 @@ async function login () {
   const draw = (step, error, info) => {
     $app.innerHTML = `<div class="wrap narrow page">
       <h1>כניסה</h1>
-      <p class="lead">${step === 1 ? 'נשלח לכם קוד בוואטסאפ, לצ\'אט "הודעה לעצמי" (הצ\'אט עם עצמכם).' : `שלחנו קוד בן 6 ספרות לצ'אט "הודעה לעצמי" בוואטסאפ של ${esc(fmtPhone(phone.replace(/\D/g, '').replace(/^0/, '972')))}. הוא בדרך כלל למעלה ברשימת הצ'אטים.`}</p>
+      <p class="lead">${step === 1 ? 'נשלח לכם קוד לקבוצת "אל-מחיק 🧽 · עדכונים" בוואטסאפ.' : `שלחנו קוד בן 6 ספרות לקבוצת "אל-מחיק 🧽 · עדכונים" בוואטסאפ של ${esc(fmtPhone(phone.replace(/\D/g, '').replace(/^0/, '972')))}.`}</p>
       <div class="card">
         ${error ? `<div class="err">${esc(error)}</div>` : ''}${info ? `<div class="ok">${esc(info)}</div>` : ''}
         <form id="f">
@@ -706,7 +579,7 @@ async function login () {
 // ---------------- dashboard ----------------
 const TYPE_ICONS = { text: '💬', image: '📷', video: '🎬', audio: '🎤', document: '📄', sticker: '🌟', location: '📍', contact: '👤' }
 const TYPE_NAMES = { text: 'טקסט', image: 'תמונות', video: 'סרטונים', audio: 'הקלטות', document: 'מסמכים', sticker: 'סטיקרים', location: 'מיקומים', contact: 'אנשי קשר' }
-const STATUS = { open: 'מחובר', connecting: 'מתחבר…', closed: 'מתחבר מחדש…', stopped: 'לא פעיל', logged_out: 'מנותק מוואטסאפ' }
+const STATUS = { open: 'מחובר', connecting: 'מתחבר…', closed: 'מתחבר מחדש…', stopped: 'לא פעיל', logged_out: 'מנותק מוואטסאפ', blocked: 'חסום' }
 
 async function dashboard () {
   if (!store.get('token')) return go('/login')
@@ -749,7 +622,15 @@ async function dashboard () {
         <div class="stat"><b>${data.backups.filter(b => b.active).length}</b><span>פעילים</span></div>
       </div>
 
-      <div class="card push-card" id="pushcard"></div>
+      ${u.status === 'blocked' ? `<div class="card relink-card"><h2>⛔ החשבון חסום</h2><p class="hint">נכתבה הודעה בקבוצת העדכונים, ולכן הגיבוי נעצר. לבירור פנו לצוות אל-מחיק.</p></div>` : ''}
+
+      <div class="card updates-card">
+        <h2>📣 קבוצת העדכונים</h2>
+        <p class="hint">בוואטסאפ יש לכם קבוצה בשם <b>"אל-מחיק 🧽 · עדכונים"</b>. לשם מגיעים קודי כניסה, הודעות מהצוות ומה שתבחרו כאן:</p>
+        <label class="toggle"><span class="t">🙋 בקשות הצטרפות<small>עם קישורים לאישור ולדחייה</small></span><span class="switch"><input type="checkbox" data-s="notifyRequests" ${settings.notifyRequests !== false ? 'checked' : ''}><span></span></span></label>
+        <label class="toggle"><span class="t">🔗 מישהו הצטרף דרך קישור</span><span class="switch"><input type="checkbox" data-s="notifyJoins" ${settings.notifyJoins !== false ? 'checked' : ''}><span></span></span></label>
+        <div class="warn-line">⛔ אסור לכתוב בקבוצת העדכונים – כל הודעה שנכתבת שם חוסמת את החשבון.</div>
+      </div>
 
       ${data.requests?.length ? `<div class="card reqcard" id="requests">
         <div class="card-head"><h2>🙋 בקשות הצטרפות <span class="badge">${data.requests.length}</span></h2></div>
@@ -797,17 +678,6 @@ async function dashboard () {
       </div>
     </div>`
 
-    mountPushCard(document.getElementById('pushcard'), userRpc, {
-      title: '🔔 התראות לטלפון',
-      hint: 'בקשות הצטרפות, ניתוק של הוואטסאפ ועדכונים מהשירות',
-      settings,
-      onSettings: saveSettings,
-      kinds: [
-        ['notifyRequests', '🙋 בקשות הצטרפות', 'עם כפתורי אישור ודחייה בתוך ההתראה'],
-        ['notifyDisconnect', '🔌 הוואטסאפ התנתק', 'כדי לחבר מחדש מהר'],
-        ['notifyJoins', '🔗 מישהו הצטרף דרך קישור', '']
-      ]
-    })
     document.getElementById('add').onclick = openAdd
     $app.querySelectorAll('[data-active]').forEach(el => { el.onchange = async () => {
       try { await userRpc('setBackupActive', { id: el.dataset.active, active: el.checked }); data.backups.find(b => b.id == el.dataset.active).active = el.checked; draw(); toast(el.checked ? '▶️ הגיבוי פעיל' : '⏸️ הגיבוי הושהה') } catch (e) { toast(e.message); el.checked = !el.checked }
@@ -1012,7 +882,7 @@ function openShare (b, onChange) {
         <div class="field"><label>תוקף${l?.expires ? ` <small>(כרגע: עד ${new Date(l.expires).toLocaleDateString('he-IL')})</small>` : ''}</label>${seg('expires', l ? [['keep', 'ללא שינוי'], ...EXPIRY] : EXPIRY, l ? 'keep' : '0')}</div>
         <div class="field"><label>מי יכול להצטרף</label>${seg('who', WHO, st.who)}
           <textarea id="lallowed" rows="3" placeholder="מספר בכל שורה: 050-1234567" ${st.who === 'list' ? '' : 'hidden'}>${esc((l?.allowed || []).map(fmtPhone).join('\n'))}</textarea></div>
-        <label class="toggle"><span class="t">✋ אישור ידני לכל בקשה<small>תקבלו התראה לטלפון עם כפתורי אישור ודחייה</small></span><span class="switch"><input type="checkbox" id="lappr" ${st.approval ? 'checked' : ''}><span></span></span></label>
+        <label class="toggle"><span class="t">✋ אישור ידני לכל בקשה<small>תקבלו הודעה בקבוצת העדכונים עם קישורים לאישור ולדחייה</small></span><span class="switch"><input type="checkbox" id="lappr" ${st.approval ? 'checked' : ''}><span></span></span></label>
         <div class="row" style="margin-top:18px"><button class="cta" id="lsave">${l ? 'שמירה' : 'יצירת קישור'}</button><button type="button" class="btn" id="lcancel">ביטול</button></div>
       </form>`
       pane.scrollTop = 0
@@ -1123,9 +993,9 @@ const UFILTERS = {
   all: ['הכל', () => true],
   open: ['מחוברים', u => u.status === 'open'],
   off: ['מנותקים', u => u.status !== 'open'],
-  attention: ['דורש תשומת לב', u => u.status === 'logged_out' || u.requests > 0 || u.paused]
+  attention: ['דורש תשומת לב', u => u.status === 'logged_out' || u.status === 'blocked' || u.requests > 0 || u.paused]
 }
-const EVENT_ICONS = { push: '🔔', deleted: '🗑️', joined: '🎉', connected: '🟢', logged_out: '🔴', control_group: '🏠', backup: '🗂️', link: '🔗', admin: '🛠️' }
+const EVENT_ICONS = { blocked: '⛔', updates_group: '📣', push: '🔔', deleted: '🗑️', joined: '🎉', connected: '🟢', logged_out: '🔴', control_group: '🏠', backup: '🗂️', link: '🔗', admin: '🛠️' }
 function ago (ts) {
   if (!ts) return '—'
   const m = Math.round((Date.now() - ts) / 60000)
@@ -1138,20 +1008,17 @@ function ago (ts) {
 }
 const eventRow = (e, withWho) => `<div class="tl"><span class="tl-ico">${EVENT_ICONS[e.type] || '•'}</span><div class="tl-txt">${withWho && e.who ? `<b>${esc(e.who)}</b> · ` : ''}${esc(e.text)}<small>${ago(e.ts)}</small></div></div>`
 
-/** Title + text + where tapping opens – for admin push notifications. */
-const pushComposer = id => `<div class="field"><label>כותרת <small>(לא חובה)</small></label><input type="text" id="${id}-title" maxlength="80" placeholder="📣 אל-מחיק"></div>
-  <div class="field"><label>תוכן ההתראה</label><textarea id="${id}-text" class="ta" rows="3" maxlength="500" placeholder="למשל: שדרגנו את הגיבוי של סרטונים 🎬"></textarea></div>
-  <div class="field"><label>לחיצה על ההתראה פותחת</label><div class="seg seg-3" id="${id}-url"><button type="button" data-v="/app" class="on">הממשק</button><button type="button" data-v="/join?relink=1">חיבור מחדש</button><button type="button" data-v="/">דף הבית</button></div></div>
-  <button class="cta block" id="${id}-send">🔔 שליחה</button>`
+/** Title + text of a team message, posted in the users' updates groups. */
+const msgComposer = id => `<div class="field"><label>כותרת <small>(לא חובה)</small></label><input type="text" id="${id}-title" maxlength="80" placeholder="הודעה מצוות אל-מחיק"></div>
+  <div class="field"><label>תוכן ההודעה</label><textarea id="${id}-text" class="ta" rows="4" maxlength="2000" placeholder="למשל: שדרגנו את הגיבוי של סרטונים 🎬"></textarea></div>
+  <button class="cta block" id="${id}-send">📣 שליחה</button>`
 function bindComposer (root, id, send) {
-  let url = '/app'
-  root.querySelectorAll(`#${id}-url button`).forEach(b => { b.onclick = () => { url = b.dataset.v; root.querySelectorAll(`#${id}-url button`).forEach(x => x.classList.toggle('on', x === b)) } })
   root.querySelector(`#${id}-send`).onclick = async e => {
     const text = root.querySelector(`#${id}-text`).value.trim()
-    if (!text) return toast('כתבו את תוכן ההתראה')
+    if (!text) return toast('כתבו את תוכן ההודעה')
     e.target.disabled = true
     try {
-      await send({ title: root.querySelector(`#${id}-title`).value.trim(), text, url })
+      await send({ title: root.querySelector(`#${id}-title`).value.trim(), text })
       root.querySelector(`#${id}-text`).value = ''
       root.querySelector(`#${id}-title`).value = ''
     } catch (err) { toast(err.message) }
@@ -1162,6 +1029,8 @@ function bindComposer (root, id, send) {
 const USER_ACTIONS = [
   ['relink', '🔌', 'חיבור מחדש בקוד', 'קוד בן 8 תווים לשלוח למשתמש', false],
   ['relock', '🔐', 'נעילת קבוצות', 'מחיל מחדש את הרשאות הקבוצות', false],
+  ['block', '⛔', 'חסימה', 'עוצר את הגיבוי של המשתמש', true],
+  ['unblock', '✅', 'ביטול חסימה', 'הגיבוי חוזר לפעול', false],
   ['restart', '♻️', 'חיבור מחדש', 'כשהבוט לא מגיב', false],
   ['loginAs', '👤', 'כניסה כמשתמש', 'פותח את הממשק שלו (ל-24 שעות)', false],
   ['pause', '⏸️', 'השהיית גיבוי', '', false],
@@ -1202,13 +1071,13 @@ function openUser (userId, onChange) {
           ${fact('נראה לאחרונה', ago(u.lastSeen))}
           ${fact('גיבויים', data.backups.length)}
           ${fact('הודעות', fmtNum(data.backups.reduce((a, b) => a + b.count, 0)))}
-          ${fact('התראות', u.pushDevices ? `🔔 ${u.pushDevices} ${u.pushDevices === 1 ? 'מכשיר' : 'מכשירים'}` : '🔕 כבויות')}
+          ${fact('קבוצת עדכונים', u.updatesGroup ? '✅ קיימת' : '— עוד לא')}
           ${fact('גיבוי', u.settings.paused ? '⏸️ מושהה' : '▶️ פעיל')}
           ${fact('בקשות ממתינות', data.requests)}
         </div>
         <div class="field" style="margin-top:16px"><label>📝 הערה פנימית <small>(רק המנהל רואה)</small></label><textarea id="unote" class="ta" rows="2" placeholder="למשל: ביקש עזרה עם הקישור, חזר אליו ב-…">${esc(u.note)}</textarea></div>
         <h3 class="sub-h">פעולות</h3>
-        <div class="actgrid">${USER_ACTIONS.filter(([a]) => !(a === 'pause' && u.settings.paused) && !(a === 'resume' && !u.settings.paused)).map(([a, ico, t, sub, danger]) =>
+        <div class="actgrid">${USER_ACTIONS.filter(([a]) => !(a === 'pause' && u.settings.paused) && !(a === 'resume' && !u.settings.paused) && !(a === 'block' && u.status === 'blocked') && !(a === 'unblock' && u.status !== 'blocked')).map(([a, ico, t, sub, danger]) =>
           `<button class="act ${danger ? 'danger' : ''}" data-ua="${a}"><span class="act-ico">${ico}</span><b>${t}</b>${sub ? `<small>${sub}</small>` : ''}</button>`).join('')}</div>`
       const note = pane.querySelector('#unote')
       note.oninput = debounce(async () => { try { await adminRpc('adminSaveNote', { userId, note: note.value }); changed = true; toast('📝 נשמר') } catch (e) { toast(e.message) } }, 700)
@@ -1252,15 +1121,12 @@ function openUser (userId, onChange) {
     }
 
     function msg () {
-      const n = data.user.pushDevices
-      pane.innerHTML = `${n ? `<p class="hint">התראה תישלח ל-${n} ${n === 1 ? 'מכשיר' : 'מכשירים'} של המשתמש.</p>` : '<div class="ok warnbox">🔕 למשתמש הזה אין התראות פעילות. אפשר לבקש ממנו להפעיל אותן בממשק שלו, או לשלוח לו הודעה בוואטסאפ.</div>'}
-        ${pushComposer('u')}`
+      pane.innerHTML = `<p class="hint">ההודעה תישלח לקבוצת העדכונים של המשתמש בוואטסאפ.</p>${msgComposer('u')}`
       bindComposer(pane, 'u', async payload => {
         await adminRpc('adminMessage', { userId, ...payload })
-        toast('🔔 נשלח')
+        toast('📣 נשלח')
         changed = true
       })
-      if (!n) pane.querySelector('#u-send').disabled = true
     }
 
     try { await load(); setTab('overview') } catch (e) { pane.innerHTML = `<div class="err">${esc(e.message)}</div>` }
@@ -1353,8 +1219,6 @@ async function admin () {
       </div>
       ${g.memory.level === 'high' ? '<div class="err">🔥 הזיכרון כמעט מלא – גיבוי קבצים מושהה זמנית. כדאי להוריד את מגבלת הקבצים או את מספר המשתמשים.</div>' : g.memory.level === 'warn' ? '<div class="ok warnbox">⚠️ הזיכרון מתקרב לתקרה. שווה לשים לב.</div>' : ''}
 
-      <div class="card push-card" id="adminpush"></div>
-
       <div class="card">
         <h2>🛡️ הגנות על הטלפון</h2><p class="hint">מה ששומר על הטלפון קריר: תמונות וסרטונים הם רוב העומס</p>
         <div class="meter-row"><span>זיכרון</span><b class="ltr">${g.memory.heapMB} / ${g.memory.limitMB} MB</b></div>
@@ -1387,8 +1251,8 @@ async function admin () {
       </div>
 
       <div class="card">
-        <h2>📣 התראה לכל המשתמשים</h2><p class="hint">נשלחת לכל מי שהפעיל התראות (${d.users.filter(u => u.push).length} מתוך ${d.users.length} משתמשים)</p>
-        <div id="bcastbox">${pushComposer('b')}</div>
+        <h2>📣 הודעה לכל המשתמשים</h2><p class="hint">נשלחת לקבוצת העדכונים של כל משתמש מחובר</p>
+        <div id="bcastbox">${msgComposer('b')}</div>
       </div>
 
       <div class="card">
@@ -1434,7 +1298,7 @@ async function admin () {
       ulist.innerHTML = list.length ? list.map(u => `<button class="item urow" data-user="${u.id}">
           <div class="ico initial">${esc((u.name || '#').trim()[0])}</div>
           <div class="txt"><div class="name">${esc(u.name || fmtPhone(u.phone))} ${u.note ? '<span title="יש הערה">📝</span>' : ''}</div>
-            <div class="meta"><span class="status ${esc(u.status)}">${STATUS[u.status] || esc(u.status)}</span> · <span class="ltr">${esc(fmtPhone(u.phone))}</span> · ${u.backups} גיבויים${u.push ? ' · 🔔' : ''}${u.paused ? ' · ⏸️' : ''}${u.requests ? ` · 🙋 ${u.requests}` : ''}</div></div>
+            <div class="meta"><span class="status ${esc(u.status)}">${STATUS[u.status] || esc(u.status)}</span> · <span class="ltr">${esc(fmtPhone(u.phone))}</span> · ${u.backups} גיבויים${u.paused ? ' · ⏸️' : ''}${u.requests ? ` · 🙋 ${u.requests}` : ''}</div></div>
           <span class="chev">‹</span></button>`).join('') : `<div class="empty">${d.users.length ? 'לא נמצא משתמש 🤷' : '<div class="e">🌱</div>עוד אין משתמשים'}</div>`
       ulist.querySelectorAll('[data-user]').forEach(el => { el.onclick = () => openUser(el.dataset.user, async () => { d = await adminRpc('adminOverview'); draw() }) })
     }
@@ -1444,9 +1308,8 @@ async function admin () {
     bindComposer(document.getElementById('bcastbox'), 'b', async payload => {
       if (!await confirmBox('לשלוח לכל המשתמשים?', payload.text.slice(0, 140), 'שליחה')) throw new RpcError('בוטל')
       const r = await adminRpc('adminMessage', payload)
-      toast(`🔔 נשלח ל-${r.sent} מכשירים`)
+      toast(`📣 נשלח ל-${r.sent} משתמשים`)
     })
-    mountPushCard(document.getElementById('adminpush'), adminRpc, { title: '🔔 התראות למנהל', hint: 'משתמש חדש הצטרף, או משתמש שהוואטסאפ שלו התנתק' })
   }
   draw()
 }
