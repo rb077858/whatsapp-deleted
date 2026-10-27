@@ -336,16 +336,19 @@ export const handlers = {
         users.update(user.id, { settings: { ...mergeSettings(), groupsLocked: user.settings.groupsLocked } })
         log('המנהל איפס את ההגדרות')
         return { message: 'ההגדרות אופסו' }
-      case 'block':
-        users.update(user.id, { status: 'blocked' })
-        await stopBot(user.id)
-        log('המנהל חסם את המשתמש')
-        return { message: 'המשתמש נחסם והגיבוי נעצר' }
+      case 'block': {
+        const online = bot?.status === 'open'
+        if (online) await bot.block('המנהל חסם את המשתמש', T.blockedByAdmin(process.env.SITE_URL || ''))
+        else { users.update(user.id, { status: 'blocked' }); await stopBot(user.id); log('המנהל חסם את המשתמש') }
+        bots.delete(user.id)
+        return { message: online ? 'נחסם: נשלחה הודעה בקבוצת העדכונים והבוט יצא ממנה' : 'נחסם (הוואטסאפ לא היה מחובר, אז לא נשלחה הודעה)' }
+      }
       case 'unblock':
-        users.update(user.id, { status: 'active' })
+        // a new updates group is created on the next connection; the old one was left on block
+        users.update(user.id, { status: 'active', updates_jid: null, settings: { ...user.settings, unblocked: true } })
         startBot(user.id)
         log('המנהל ביטל את החסימה')
-        return { message: 'החסימה בוטלה והגיבוי חוזר לפעול' }
+        return { message: 'החסימה בוטלה – נוצרת קבוצת עדכונים חדשה והגיבוי חוזר לפעול' }
       case 'loginAs':
         log('המנהל נכנס לממשק של המשתמש')
         return { token: sessions.create(user.id, 'user', 1) }

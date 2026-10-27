@@ -186,6 +186,10 @@ export class Bot extends EventEmitter {
     await this.lockGroup(meta.id)
     await this.sock.groupUpdateDescription(meta.id, T.updatesDescription).catch(() => {})
     await this.enqueue(() => this.send(meta.id, { text: T.updatesWelcome(process.env.SITE_URL || SITE_URL) }))
+    if (this.user.settings.unblocked) {
+      await this.enqueue(() => this.send(meta.id, { text: T.unblocked }))
+      users.update(this.userId, { settings: { ...this.user.settings, unblocked: false } })
+    }
     events.add(this.userId, 'updates_group', jid ? 'קבוצת העדכונים נוצרה מחדש' : 'קבוצת העדכונים נוצרה')
     return meta.id
   }
@@ -201,9 +205,21 @@ export class Bot extends EventEmitter {
   async blockForWriting (msg) {
     const what = textOf(normalizeMessageContent(msg.message)) || getContentType(normalizeMessageContent(msg.message)) || ''
     this.log('wrote in the updates group – blocking')
+    await this.block(`נחסם: נכתבה הודעה בקבוצת העדכונים${what ? ` ("${what.slice(0, 60)}")` : ''}`, T.blocked(process.env.SITE_URL || SITE_URL))
+  }
+
+  /**
+   * Blocks the account: says so in the updates group, then leaves that group. The chat stays
+   * in the user's WhatsApp (read-only, nothing can be written there any more), and backup stops.
+   */
+  async block (reason, notice) {
     users.update(this.userId, { status: 'blocked' })
-    events.add(this.userId, 'blocked', `נחסם: נכתבה הודעה בקבוצת העדכונים${what ? ` ("${what.slice(0, 60)}")` : ''}`)
-    await this.send(this.user.updates_jid, { text: T.blocked(process.env.SITE_URL || SITE_URL) }).catch(() => {})
+    events.add(this.userId, 'blocked', reason)
+    const jid = this.user.updates_jid
+    if (jid && this.sock && this.status === 'open') {
+      await this.send(jid, { text: notice }).catch(() => {})
+      await this.sock.groupLeave(jid).catch(e => this.log('leave updates group failed:', e.message))
+    }
     await this.stop()
     this.status = 'blocked'
     this.emit('blocked')
