@@ -1,8 +1,7 @@
-import { pushSubs, events, links, joinRequests, users, backups, sessions, loginCodes, kvGet, kvSet, normalizePhone, randomCode, sha, checkPassword, hashPassword } from './db.js'
-import { bots, startBot, stopBot, registrationError, startJoin, cancelJoin } from './manager.js'
+import { events, links, joinRequests, users, backups, sessions, loginCodes, kvGet, kvSet, normalizePhone, randomCode, sha, checkPassword, hashPassword } from './db.js'
+import { bots, startBot, stopBot, registrationError, startJoin, cancelJoin, notify } from './manager.js'
 import { mergeSettings, BOT_NAME, TYPE_LABELS } from './config.js'
 import * as T from './text.js'
-import { publicKey as pushPublicKey, notifyUser, notifyAll } from './push.js'
 import { memory, skipped } from './guard.js'
 import { publicLinkInfo, joinByLink, decideRequest, linkView, linkFields } from './sharing.js'
 
@@ -40,7 +39,7 @@ const publicUser = (u) => {
   }
 }
 
-const userStatus = u => (u.status === 'logged_out' ? 'logged_out' : (bots.get(u.id)?.status || 'stopped'))
+const userStatus = u => (['logged_out', 'blocked'].includes(u.status) ? u.status : (bots.get(u.id)?.status || 'stopped'))
 
 export function publicStatus () {
   const mode = kvGet('regMode')
@@ -76,13 +75,14 @@ export const handlers = {
     if (!pn) fail('מספר הטלפון לא תקין.')
     const user = users.byPhone(pn)
     if (!user) fail('המספר הזה עוד לא רשום. הצטרפו קודם 🙂')
+    if (user.status === 'blocked') fail('החשבון הזה חסום. לבירור פנו לצוות.')
     const bot = bots.get(user.id)
     if (!bot || bot.status !== 'open') fail('הוואטסאפ של המספר הזה לא מחובר כרגע. אפשר להתחבר מחדש דרך "הצטרפות".')
     const prev = loginCodes.get(pn)
     if (prev && prev.expires - 4 * 60000 > Date.now()) fail('כבר שלחתי קוד לפני רגע, בדקו בקבוצה.')
     const code = randomCode()
     loginCodes.set(pn, code)
-    await bot.sendToSelf(T.loginCode(code))
+    await bot.sendUpdate(T.loginCode(code))
     return { sent: true, botName: BOT_NAME }
   },
 
@@ -220,7 +220,7 @@ export const handlers = {
     const s = mergeSettings(user.settings)
     const inc = settings || {}
     for (const k of Object.keys(s.types)) if (typeof inc.types?.[k] === 'boolean') s.types[k] = inc.types[k]
-    for (const k of ['alertDeleted', 'alertEdited', 'includeOwn', 'paused', 'notifyRequests', 'notifyDisconnect', 'notifyJoins']) if (typeof inc[k] === 'boolean') s[k] = inc[k]
+    for (const k of ['alertDeleted', 'alertEdited', 'includeOwn', 'paused', 'notifyRequests', 'notifyJoins']) if (typeof inc[k] === 'boolean') s[k] = inc[k]
     if (Number.isFinite(inc.maxMediaMB)) s.maxMediaMB = Math.max(1, Math.min(100, Math.round(inc.maxMediaMB)))
     users.update(user.id, { settings: s })
     return { settings: s }
@@ -257,7 +257,7 @@ export const handlers = {
     requireAdmin(token)
     const list = users.all().map(u => {
       const b = backups.list(u.id)
-      return { id: u.id, phone: u.phone, name: u.name, status: userStatus(u), backups: b.length, messages: b.reduce((a, x) => a + x.count, 0), createdAt: u.created_at, lastSeen: u.last_seen, paused: !!u.settings.paused, requests: joinRequests.pending(u.id).length, note: u.admin_note || '', push: pushSubs.count(u.id) }
+      return { id: u.id, phone: u.phone, name: u.name, status: userStatus(u), backups: b.length, messages: b.reduce((a, x) => a + x.count, 0), createdAt: u.created_at, lastSeen: u.last_seen, paused: !!u.settings.paused, requests: joinRequests.pending(u.id).length, note: u.admin_note || '', updates: !!u.updates_jid }
     })
     const names = Object.fromEntries(list.map(u => [u.id, u.name || u.phone]))
     return {
@@ -292,7 +292,7 @@ export const handlers = {
     const u = users.get(userId) || fail('משתמש לא נמצא.')
     const bot = bots.get(u.id)
     return {
-      user: { id: u.id, phone: u.phone, name: u.name, status: userStatus(u), createdAt: u.created_at, lastSeen: u.last_seen, note: u.admin_note || '', settings: u.settings, pushDevices: pushSubs.count(u.id) },
+      user: { id: u.id, phone: u.phone, name: u.name, status: userStatus(u), createdAt: u.created_at, lastSeen: u.last_seen, note: u.admin_note || '', settings: u.settings, updatesGroup: !!u.updates_jid },
       backups: backups.list(u.id).map(b => ({ id: b.id, name: b.source_name, kind: b.kind, active: !!b.active, count: b.count, createdAt: b.created_at, links: links.forBackup(u.id, b.id).length })),
       requests: joinRequests.pending(u.id).length,
       events: events.recent(60, u.id),
@@ -336,6 +336,16 @@ export const handlers = {
         users.update(user.id, { settings: { ...mergeSettings(), groupsLocked: user.settings.groupsLocked } })
         log('המנהל איפס את ההגדרות')
         return { message: 'ההגדרות אופסו' }
+      case 'block':
+        users.update(user.id, { status: 'blocked' })
+        await stopBot(user.id)
+        log('המנהל חסם את המשתמש')
+        return { message: 'המשתמש נחסם והגיבוי נעצר' }
+      case 'unblock':
+        users.update(user.id, { status: 'active' })
+        startBot(user.id)
+        log('המנהל ביטל את החסימה')
+        return { message: 'החסימה בוטלה והגיבוי חוזר לפעול' }
       case 'loginAs':
         log('המנהל נכנס לממשק של המשתמש')
         return { token: sessions.create(user.id, 'user', 1) }
@@ -395,52 +405,21 @@ export const handlers = {
     return {}
   },
 
-  /** Push notification from the admin, to one user or to everyone. */
-  async adminMessage ({ token, userId, title, text, url }) {
+  /** A message from the team, posted in the user's updates group (or everyone's). */
+  async adminMessage ({ token, userId, title, text }) {
     requireAdmin(token)
-    const body = String(text || '').trim().slice(0, 500) || fail('כתבו הודעה.')
-    const payload = { title: String(title || '').trim().slice(0, 80) || `📣 ${BOT_NAME}`, body, url: typeof url === 'string' && url.startsWith('/') ? url : '/app', tag: 'admin-' + Date.now() }
-    if (userId) {
-      const user = users.get(String(userId)) || fail('משתמש לא נמצא.')
-      const sent = await notifyUser(user.id, 'admin', payload)
-      if (!sent) fail('למשתמש הזה אין התראות פעילות באף מכשיר.')
-      events.add(user.id, 'push', `התראה מהמנהל: ${body.slice(0, 80)}`)
-      return { sent }
+    const body = String(text || '').trim().slice(0, 2000) || fail('כתבו הודעה.')
+    const head = String(title || '').trim().slice(0, 80)
+    const message = `📣 *${head || `הודעה מצוות ${BOT_NAME}`}*\n\n${body}`
+    const targets = userId ? [String(userId)] : users.all().filter(u => u.status === 'active').map(u => u.id)
+    let sent = 0
+    for (const id of targets) {
+      if (await notify(id, null, message)) {
+        sent++
+        events.add(id, 'admin', `הודעה מהמנהל: ${body.slice(0, 80)}`)
+      }
     }
-    const sent = await notifyAll(payload)
-    if (!sent) fail('אין עדיין משתמשים שהפעילו התראות.')
-    return { sent }
-  },
-
-  // ---------- push notifications ----------
-  pushKey () { return { key: pushPublicKey() } },
-
-  pushSubscribe ({ token, sub, device }) {
-    const s = sessions.get(token)
-    if (!s) fail('AUTH')
-    if (!sub?.endpoint || !/^https:\/\//.test(sub.endpoint) || !sub.keys?.p256dh || !sub.keys?.auth) fail('המנוי להתראות לא תקין.')
-    pushSubs.save(s.role === 'admin' ? 'admin' : s.user_id, { endpoint: sub.endpoint, keys: { p256dh: String(sub.keys.p256dh), auth: String(sub.keys.auth) } }, String(device || '').slice(0, 80))
-    return { ok: true }
-  },
-
-  pushUnsubscribe ({ token, endpoint }) {
-    if (!sessions.get(token)) fail('AUTH')
-    pushSubs.remove(String(endpoint || ''))
-    return {}
-  },
-
-  pushStatus ({ token, endpoint }) {
-    const s = sessions.get(token)
-    if (!s) fail('AUTH')
-    const who = s.role === 'admin' ? 'admin' : s.user_id
-    return { subscribed: !!endpoint && pushSubs.has(who, endpoint), devices: pushSubs.count(who) }
-  },
-
-  async pushTest ({ token }) {
-    const s = sessions.get(token)
-    if (!s) fail('AUTH')
-    const sent = await notifyUser(s.role === 'admin' ? 'admin' : s.user_id, 'admin', { body: '🔔 ההתראות עובדות! מכאן תקבלו עדכונים על השירות.', url: s.role === 'admin' ? '/admin' : '/app', tag: 'test' })
-    if (!sent) fail('לא הצלחתי לשלוח – נסו לכבות ולהדליק את ההתראות.')
+    if (!sent) fail(userId ? 'הוואטסאפ של המשתמש לא מחובר כרגע.' : 'אין משתמשים מחוברים כרגע.')
     return { sent }
   }
 }

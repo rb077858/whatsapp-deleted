@@ -469,11 +469,8 @@ html.locked, html.locked body { overflow: hidden; overscroll-behavior: none }
 .rl-status.done { background: color-mix(in srgb, var(--green) 15%, transparent) }
 .spinner.sm { width: 18px; height: 18px; border-width: 3px; margin: 0 }
 
-/* notifications card */
-.push-card { border-color: color-mix(in srgb, var(--sponge) 55%, var(--line)); background: color-mix(in srgb, var(--sponge) 8%, var(--card)) }
-.push-state { font-size: 15px; color: var(--mute); margin: 4px 0 6px }
-.push-state.on { color: var(--ink) }
-.push-card .card-head { flex-wrap: nowrap; align-items: flex-start }
-.push-card .card-head .switch { margin-top: 4px }
-.push-state.waiting { color: var(--ink); font-weight: 500; line-height: 1.5 }
-.push-help { background: var(--card); border: 1px solid var(--line); border-radius: 14px; padding: 12px 14px; font-size: 14px; line-height: 1.55; margin: 8px 0 4px; color: var(--ink) }
+
+/* updates group */
+.updates-card { border-color: color-mix(in srgb, var(--sponge) 55%, var(--line)); background: color-mix(in srgb, var(--sponge) 8%, var(--card)) }
+.warn-line { margin-top: 12px; padding: 10px 12px; border-radius: 12px; background: var(--danger-soft); color: var(--danger); font-size: 14px; font-weight: 600 }
+.status.blocked::before { background: var(--danger) }

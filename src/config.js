@@ -26,9 +26,8 @@ export const DEFAULT_USER_SETTINGS = {
   includeOwn: true,
   paused: false,
   maxMediaMB: 16,
-  notifyRequests: true,
-  notifyDisconnect: true,
-  notifyJoins: true
+  notifyRequests: true, // join requests go to the updates group
+  notifyJoins: true // so do joins through a link
 }
 
 export const TYPE_LABELS = {

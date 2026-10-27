@@ -10,9 +10,7 @@ const { users, backups, contacts, sessions } = await import('../src/db.js')
 const { Bot } = await import('../src/bot.js')
 const { bots } = await import('../src/manager.js')
 const { handlers } = await import('../src/api.js')
-const push = await import('../src/push.js')
-const pushed = []
-push.transport.send = async (sub, body) => { pushed.push({ endpoint: sub.endpoint, ...JSON.parse(body) }) }
+
 const { proto } = await import('baileys')
 
 let n = 0
@@ -55,11 +53,18 @@ assert.ok(added.results.every(r => r.ok))
 const fam = backups.bySource(u.id, 'fam@g.us')
 assert.ok(fam, 'backup group created')
 
-// login code goes to the user's own "message yourself" chat
+// the updates group: created locked, with a welcome that warns not to write there
+const updatesJid = await bot.ensureUpdatesGroup()
+await settle()
+assert.equal(users.get(u.id).updates_jid, updatesJid)
+assert.match(sent.at(-1).content.text, /אסור לכתוב/)
+assert.ok(!(await bot.search('עדכונים')).some(r => r.jid === updatesJid), 'updates group is never offered for backup')
+
+// login code goes to the updates group
 await handlers.loginStart({ phone: '050-1234567' })
 await settle()
-assert.equal(sent.at(-1).jid, '972501234567@s.whatsapp.net')
-assert.match(sent.at(-1).content.text, /קוד הכניסה/)
+assert.equal(sent.at(-1).jid, updatesJid)
+assert.match(sent.at(-1).content.text, /קוד כניסה/)
 
 // backup: text, quote, edit and delete alerts, own messages, location
 const inBackup = () => sent.filter(s => s.jid === fam.backup_jid)
@@ -96,25 +101,32 @@ const link = (await handlers.createLink({ token, id: fam.id, options: { maxUses:
 assert.deepEqual(await handlers.linkJoin({ link: link.id, phone: '0521231235' }), { status: 'added' })
 await assert.rejects(handlers.linkJoin({ link: link.id, phone: '0521231236' }), /מלאה/)
 
-// notifications: subscribe, join request with approve/reject buttons, admin message, disconnect alert
-await handlers.pushSubscribe({ token, sub: { endpoint: 'https://push.example/1', keys: { p256dh: 'k', auth: 'a' } }, device: 'test' })
-assert.equal((await handlers.pushStatus({ token, endpoint: 'https://push.example/1' })).subscribed, true)
+// join request: posted in the updates group with approve/reject links
 const approvalLink = (await handlers.createLink({ token, id: fam.id, options: { approval: true } })).link
 assert.deepEqual(await handlers.linkJoin({ link: approvalLink.id, phone: '0507777777', name: 'דנה' }), { status: 'pending' })
 await settle()
-const req = pushed.at(-1)
-assert.match(req.body, /דנה/)
-assert.deepEqual(req.actions.map(a => a.action), ['approve', 'reject'])
-const reqId = Number(new URL(req.actions[0].url, 'https://x').searchParams.get('req'))
+const reqMsg = sent.at(-1)
+assert.equal(reqMsg.jid, updatesJid)
+assert.match(reqMsg.content.text, /דנה/)
+const reqId = Number(reqMsg.content.text.match(/req=(\d+)&act=approve/)[1])
 assert.deepEqual(await handlers.decideRequest({ token, requestId: reqId, approve: true }), { status: 'added' })
+
+// team message from the admin goes to the updates group
 const admin = sessions.create('admin', 'admin')
 assert.deepEqual(await handlers.adminMessage({ token: admin, userId: u.id, text: 'שלום מהצוות' }), { sent: 1 })
-assert.equal(pushed.at(-1).body, 'שלום מהצוות')
-users.update(u.id, { settings: { ...users.get(u.id).settings, notifyDisconnect: false } })
-const before2 = pushed.length
-bot.handleLoggedOut()
-await settle()
-assert.equal(pushed.length, before2, 'disconnect alert respects the user setting')
+assert.equal(sent.at(-1).jid, updatesJid)
+assert.match(sent.at(-1).content.text, /שלום מהצוות/)
+
+// a reaction in the updates group is fine; writing there blocks the account
+await incoming({ key: { remoteJid: updatesJid, fromMe: true, id: 'R1' }, message: { reactionMessage: { text: '👍', key: { id: 'B1' } } } })
+assert.equal(users.get(u.id).status, 'active')
+await incoming({ key: { remoteJid: updatesJid, fromMe: true, id: 'W1' }, message: { conversation: 'שלום?' } })
+assert.equal(users.get(u.id).status, 'blocked')
+assert.match(sent.at(-1).content.text, /החשבון נחסם/)
+assert.equal(bot.status, 'blocked')
+await assert.rejects(handlers.loginStart({ phone: '050-1234567' }), /חסום/)
+assert.deepEqual(await handlers.adminUserAction({ token: admin, userId: u.id, action: 'unblock' }).then(r => r.message), 'החסימה בוטלה והגיבוי חוזר לפעול')
+assert.equal(users.get(u.id).status, 'active')
 
 console.log('✔ smoke test passed')
 process.exit(0)

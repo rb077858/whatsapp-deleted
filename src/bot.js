@@ -10,7 +10,6 @@ import makeWASocket, {
 import { SESSIONS_DIR, TMP_DIR, BOT_NAME, BACKUP_SUFFIX } from './config.js'
 import { users, backups, msgmap, contacts, events } from './db.js'
 import * as T from './text.js'
-import { notifyUser } from './push.js'
 import { SITE_URL } from './config.js'
 import { maxMediaBytes, mediaAllowed, withMediaSlot, skipped } from './guard.js'
 
@@ -29,6 +28,13 @@ export function textOf (c) {
   if (!c) return ''
   return c.conversation || c.extendedTextMessage?.text || c.imageMessage?.caption || c.videoMessage?.caption ||
     c.documentMessage?.caption || c.pollCreationMessage?.name || c.pollCreationMessageV3?.name || ''
+}
+
+// what counts as "writing" in the updates group: real content, not reactions, deletes or edits
+const NOT_WRITING = ['protocolMessage', 'reactionMessage', 'senderKeyDistributionMessage', 'messageContextInfo', 'pinInChatMessage', 'keepInChatMessage', 'pollUpdateMessage', 'encReactionMessage']
+const isWriting = msg => {
+  const t = getContentType(normalizeMessageContent(msg.message))
+  return !!t && !NOT_WRITING.includes(t)
 }
 
 const phoneOf = jid => (jid && jid.endsWith('@s.whatsapp.net') ? jidDecode(jid)?.user : null)
@@ -54,6 +60,7 @@ export class Bot extends EventEmitter {
   log (...a) { console.log(`[${this.userId}]`, ...a) }
 
   async start () {
+    if (this.user?.status === 'blocked') { this.status = 'blocked'; this.stopped = true; return }
     this.stopped = false
     this.status = 'connecting'
     const { state, saveCreds } = await useMultiFileAuthState(this.dir)
@@ -98,7 +105,9 @@ export class Bot extends EventEmitter {
       this.emit('open')
       if (!this.startupChecked) {
         this.startupChecked = true
-        this.retireControlGroup().catch(e => this.log('retire control group error', e.message))
+        this.retireControlGroup()
+          .then(() => this.ensureUpdatesGroup())
+          .catch(e => this.log('updates group error', e.message))
         this.lockExistingBackups().catch(e => this.log('lock backups error', e.message))
       }
     }
@@ -116,15 +125,6 @@ export class Bot extends EventEmitter {
   /** `byRequest`: the user or the admin disconnected on purpose – no alert needed. */
   handleLoggedOut (byRequest = false) {
     events.add(this.userId, 'logged_out', byRequest ? 'נותק מוואטסאפ לפי בקשה' : 'התנתק מוואטסאפ (מכשיר מקושר הוסר)')
-    if (!byRequest) {
-      notifyUser(this.userId, 'disconnect', {
-        body: '🔌 הוואטסאפ התנתק מהשירות והגיבוי נעצר. לחצו כדי לחבר מחדש – כל הגיבויים שמורים.',
-        url: `/join?relink=1`,
-        tag: 'disconnect',
-        urgent: true
-      }).catch(() => {})
-      notifyUser('admin', 'admin', { body: `🔴 ${this.user?.name || this.user?.phone} התנתק מוואטסאפ`, url: '/admin', tag: 'admin-out-' + this.userId }).catch(() => {})
-    }
     this.status = 'logged_out'
     this.stopped = true
     this.sock = null
@@ -165,11 +165,48 @@ export class Bot extends EventEmitter {
     return m
   }
 
-  /** A short message to the user's own "message yourself" chat (used for login codes). */
-  sendToSelf (text) {
-    const jid = this.user?.phone && this.user.phone + '@s.whatsapp.net'
-    if (!jid) return Promise.reject(new Error('no phone'))
+  // ---------- the updates group ----------
+  /**
+   * A read-only group with service updates (join requests, link joins, login codes, team messages).
+   * It is created from the user's own account, so WhatsApp can't stop them from writing in it;
+   * writing there blocks the account instead (see onMessages).
+   */
+  async ensureUpdatesGroup () {
+    const jid = this.user.updates_jid
+    if (jid) {
+      try {
+        const meta = await this.sock.groupMetadata(jid)
+        if (meta?.id) return jid
+      } catch (e) {
+        this.log('updates group not reachable, creating a new one:', e.message)
+      }
+    }
+    const meta = await this.sock.groupCreate(T.UPDATES_NAME, [])
+    users.update(this.userId, { updates_jid: meta.id })
+    await this.lockGroup(meta.id)
+    await this.sock.groupUpdateDescription(meta.id, T.updatesDescription).catch(() => {})
+    await this.enqueue(() => this.send(meta.id, { text: T.updatesWelcome(process.env.SITE_URL || SITE_URL) }))
+    events.add(this.userId, 'updates_group', jid ? 'קבוצת העדכונים נוצרה מחדש' : 'קבוצת העדכונים נוצרה')
+    return meta.id
+  }
+
+  /** Posts a message in the user's updates group (creating the group if needed). */
+  async sendUpdate (text) {
+    if (!this.sock || this.status !== 'open') throw new Error('הוואטסאפ של המשתמש לא מחובר כרגע.')
+    const jid = this.user.updates_jid || await this.ensureUpdatesGroup()
     return this.enqueue(() => this.send(jid, { text }))
+  }
+
+  /** The user wrote in the updates group: block the account (the admin can unblock). */
+  async blockForWriting (msg) {
+    const what = textOf(normalizeMessageContent(msg.message)) || getContentType(normalizeMessageContent(msg.message)) || ''
+    this.log('wrote in the updates group – blocking')
+    users.update(this.userId, { status: 'blocked' })
+    events.add(this.userId, 'blocked', `נחסם: נכתבה הודעה בקבוצת העדכונים${what ? ` ("${what.slice(0, 60)}")` : ''}`)
+    await this.send(this.user.updates_jid, { text: T.blocked(process.env.SITE_URL || SITE_URL) }).catch(() => {})
+    await this.stop()
+    this.status = 'blocked'
+    this.emit('blocked')
   }
 
   /**
@@ -181,7 +218,7 @@ export class Bot extends EventEmitter {
     if (!jid) return
     users.update(this.userId, { control_jid: null })
     const site = process.env.SITE_URL || SITE_URL
-    await this.enqueue(() => this.send(jid, { text: `🧽 *${BOT_NAME} עבר לאתר*\n\nמעכשיו כל הניהול – מה לגבות, הגדרות, שיתוף ובקשות הצטרפות – נעשה באתר${site ? `:\n${site}/app` : '.'}\n\nבאתר אפשר להפעיל התראות לטלפון, כדי לקבל עדכונים.\nאת הקבוצה הזו כבר אפשר למחוק 👋` })).catch(() => {})
+    await this.enqueue(() => this.send(jid, { text: `🧽 *${BOT_NAME} עבר לאתר*\n\nמעכשיו כל הניהול – מה לגבות, הגדרות, שיתוף ובקשות הצטרפות – נעשה באתר${site ? `:\n${site}/app` : '.'}\n\nעדכונים יגיעו לקבוצה החדשה "${T.UPDATES_NAME}".\nאת הקבוצה הזו כבר אפשר למחוק 👋` })).catch(() => {})
     events.add(this.userId, 'control_group', 'הקבוצה הראשית הוחלפה בניהול דרך האתר')
   }
 
@@ -195,6 +232,10 @@ export class Bot extends EventEmitter {
       if (jid === 'status@broadcast' || jid.endsWith('@newsletter')) continue
       if (this.sentIds.has(msg.key.id)) continue
       this.rememberSender(msg)
+      if (jid === u.updates_jid) {
+        if (type === 'notify' && msg.key.fromMe && isWriting(msg)) await this.blockForWriting(msg)
+        continue
+      }
       if (type !== 'notify') continue
       if (backups.byBackupJid(this.userId, jid)) continue
       const b = backups.bySource(this.userId, jid) || (msg.key.remoteJidAlt && backups.bySource(this.userId, msg.key.remoteJidAlt))
@@ -444,6 +485,7 @@ export class Bot extends EventEmitter {
     const q = String(query || '').trim().toLowerCase()
     const u = this.user
     const own = new Set(backups.list(this.userId).map(b => b.backup_jid))
+    own.add(u.updates_jid)
     const results = []
     const groups = await this.allGroups().catch(() => [])
     for (const g of groups) {

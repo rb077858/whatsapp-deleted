@@ -1,9 +1,26 @@
 import { BOT_NAME } from './config.js'
 
-export const loginCode = code => `🔐 קוד הכניסה שלך ל${BOT_NAME}:\n\n*${code}*\n\nתקף ל-5 דקות. לא ביקשת? פשוט להתעלם 🙂`
+export const UPDATES_NAME = `${BOT_NAME} · עדכונים`
+
+export const loginCode = code => `🔐 *קוד כניסה לאתר*\n\n*${code}*\n\nתקף ל-5 דקות. לא ביקשת? פשוט להתעלם 🙂`
 
 export const backupIntro = (name, kind) => `*${BOT_NAME}*\nכאן יישמר עותק של כל ההודעות ${kind === 'group' ? 'מהקבוצה' : 'מהצ\'אט עם'} *${name}*.\nגם אם מישהו ימחק או יערוך הודעה – העותק נשאר כאן. 🔒`
 
 export const typeNames = {
   image: '📷 תמונה', video: '🎬 סרטון', audio: '🎤 הקלטה', document: '📄 מסמך', sticker: '🌟 סטיקר', location: '📍 מיקום', contact: '👤 איש קשר'
 }
+
+export const updatesWelcome = site => `📣 *קבוצת העדכונים של ${BOT_NAME}*
+
+כאן יגיעו עדכונים על השירות: בקשות הצטרפות לאישור, הצטרפויות דרך קישור, קודי כניסה לאתר והודעות מהצוות.
+
+⛔ *אסור לכתוב בקבוצה הזו.* כל הודעה שתיכתב כאן תגרום לחסימת החשבון.
+
+${site ? `הניהול כולו באתר:\n${site}/app` : 'הניהול כולו באתר.'}`
+
+export const updatesDescription = `קבוצת עדכונים בלבד של ${BOT_NAME}. אסור לכתוב כאן – כתיבה בקבוצה חוסמת את החשבון.`
+
+export const blocked = site => `⛔ *החשבון נחסם*
+
+נכתבה הודעה בקבוצת העדכונים, ולכן הגיבוי נעצר. קבוצות ה(הודעות) וכל מה שנשמר בהן נשארים אצלך.
+לבירור, אפשר לפנות לצוות ${BOT_NAME}${site ? ` דרך האתר:\n${site}` : '.'}`
