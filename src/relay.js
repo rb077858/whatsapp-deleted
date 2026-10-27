@@ -7,7 +7,10 @@ import { SERVICE_ACCOUNT_FILE } from './config.js'
 import { handlers, ApiError, publicStatus } from './api.js'
 import { ShareError } from './sharing.js'
 import { startJoin, cancelJoin } from './manager.js'
-import { sessions, msgmap, events } from './db.js'
+import os from 'node:os'
+import crypto from 'node:crypto'
+import { sessions, msgmap, events, kvGet, kvSet } from './db.js'
+import { ON_PHONE } from './config.js'
 
 let app = null
 let fsdb = null
@@ -125,9 +128,22 @@ async function watchdog (subs) {
   for (const [id, t] of seen) if (t < Date.now() - 10 * 60000) seen.delete(id)
 }
 
+// Which server this is, so two servers (say the phone and a PC) never answer the same requests.
+let instanceId = kvGet('instanceId')
+if (!instanceId) { instanceId = crypto.randomBytes(8).toString('hex'); kvSet('instanceId', instanceId) }
+const hostName = ON_PHONE ? 'הטלפון' : `מחשב (${os.hostname()})`
+
 async function heartbeat (online = true) {
   if (!fsdb) return
-  await fsdb.doc('public/status').set({ ...publicStatus(), online, updatedAt: FieldValue.serverTimestamp() }).catch(e => console.log('[relay] heartbeat failed:', e.message))
+  await fsdb.doc('public/status').set({ ...publicStatus(), online, host: { id: instanceId, name: hostName }, updatedAt: FieldValue.serverTimestamp() }).catch(e => console.log('[relay] heartbeat failed:', e.message))
+}
+
+/** Another server that reported in the last 2.5 minutes, or null. */
+async function otherServer () {
+  const d = (await fsdb.doc('public/status').get().catch(() => null))?.data()
+  if (!d?.online || !d.host?.id || d.host.id === instanceId) return null
+  const at = d.updatedAt?.toMillis?.() || 0
+  return Date.now() - at < 150000 ? d.host : null
 }
 
 async function cleanup () {
@@ -155,6 +171,19 @@ export async function startRelay () {
   process.env.SITE_URL ||= `https://${sa.project_id}.web.app`
   app = initializeApp({ credential: cert(sa), projectId: sa.project_id }, 'relay-' + Date.now())
   fsdb = getFirestore(app)
+  const other = await otherServer()
+  if (other) {
+    // stand by: check again every minute and take over once the other server stops
+    relayState.error = `שרת אחר כבר פעיל (${other.name}). השרת הזה ממתין, וייכנס לפעולה כשהשרת האחר ייעצר.`
+    console.log(`⏸️  another server is active (${other.name}) – standing by`)
+    const a = app
+    app = null
+    fsdb = null
+    await deleteApp(a).catch(() => {})
+    timers.push(setTimeout(() => startRelay().catch(e => console.log('relay retry failed:', e.message)), 60000))
+    return
+  }
+  relayState.error = null
   const subs = { rpc: listen('rpc', handleRpc), joins: listen('joins', handleJoin) }
   timers.push(setInterval(() => watchdog(subs).catch(e => console.log('[relay] watchdog:', e.message)), 30000))
   await heartbeat()
@@ -164,7 +193,7 @@ export async function startRelay () {
 }
 
 export async function stopRelay () {
-  timers.forEach(clearInterval)
+  timers.forEach(t => { clearInterval(t); clearTimeout(t) })
   timers = []
   unsubs.forEach(u => { try { u() } catch {} })
   unsubs = []
