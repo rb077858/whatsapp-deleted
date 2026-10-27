@@ -475,3 +475,5 @@ html.locked, html.locked body { overflow: hidden; overscroll-behavior: none }
 .push-state.on { color: var(--ink) }
 .push-card .card-head { flex-wrap: nowrap; align-items: flex-start }
 .push-card .card-head .switch { margin-top: 4px }
+.push-state.waiting { color: var(--ink); font-weight: 500; line-height: 1.5 }
+.push-help { background: var(--card); border: 1px solid var(--line); border-radius: 14px; padding: 12px 14px; font-size: 14px; line-height: 1.55; margin: 8px 0 4px; color: var(--ink) }
