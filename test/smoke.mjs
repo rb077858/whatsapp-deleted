@@ -15,6 +15,7 @@ const { proto } = await import('baileys')
 
 let n = 0
 const sent = []
+const left = []
 function fakeSocket () {
   return {
     sendMessage: async (jid, content, opts) => { const id = 'B' + (++n); sent.push({ id, jid, content, quoted: opts?.quoted?.key?.id }); return { key: { id, remoteJid: jid, fromMe: true } } },
@@ -25,6 +26,7 @@ function fakeSocket () {
     groupUpdateDescription: async () => {},
     groupSettingUpdate: async () => {},
     groupMemberAddMode: async () => {},
+    groupLeave: async jid => { left.push(jid) },
     onWhatsApp: async jid => [{ exists: true, jid }],
     groupParticipantsUpdate: async () => [{ status: '200' }],
     signalRepository: { lidMapping: { getLIDForPN: async () => null } }
@@ -123,10 +125,23 @@ assert.equal(users.get(u.id).status, 'active')
 await incoming({ key: { remoteJid: updatesJid, fromMe: true, id: 'W1' }, message: { conversation: 'שלום?' } })
 assert.equal(users.get(u.id).status, 'blocked')
 assert.match(sent.at(-1).content.text, /החשבון נחסם/)
+assert.deepEqual(left, [updatesJid], 'the bot leaves the updates group, which stays in the chat list')
 assert.equal(bot.status, 'blocked')
 await assert.rejects(handlers.loginStart({ phone: '050-1234567' }), /חסום/)
-assert.deepEqual(await handlers.adminUserAction({ token: admin, userId: u.id, action: 'unblock' }).then(r => r.message), 'החסימה בוטלה והגיבוי חוזר לפעול')
+
+// unblock: a new updates group, with a note that the old one can be deleted
+await handlers.adminUserAction({ token: admin, userId: u.id, action: 'unblock' })
 assert.equal(users.get(u.id).status, 'active')
+assert.equal(users.get(u.id).updates_jid, null)
+bots.get(u.id)?.stop()
+const bot2 = new Bot(u.id)
+bot2.status = 'open'
+bot2.sock = fakeSocket()
+const newUpdates = await bot2.ensureUpdatesGroup()
+await bot2.queue
+assert.notEqual(newUpdates, updatesJid)
+assert.match(sent.at(-1).content.text, /החסימה בוטלה/)
+assert.equal(users.get(u.id).settings.unblocked, false)
 
 console.log('✔ smoke test passed')
 process.exit(0)
