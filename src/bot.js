@@ -9,8 +9,9 @@ import makeWASocket, {
 } from 'baileys'
 import { SESSIONS_DIR, TMP_DIR, BOT_NAME, BACKUP_SUFFIX } from './config.js'
 import { users, backups, msgmap, contacts, events } from './db.js'
-import { Commands } from './commands.js'
 import * as T from './text.js'
+import { notifyUser } from './push.js'
+import { SITE_URL } from './config.js'
 import { maxMediaBytes, mediaAllowed, withMediaSlot, skipped } from './guard.js'
 
 export const baileysLogger = pino({ level: process.env.BAILEYS_LOG || 'silent' })
@@ -46,8 +47,7 @@ export class Bot extends EventEmitter {
     this.queue = Promise.resolve()
     this.groupCache = new Map()
     this.groupsList = null
-    this.controlChecked = false
-    this.commands = new Commands(this)
+    this.startupChecked = false
   }
 
   get user () { return users.get(this.userId) }
@@ -96,9 +96,9 @@ export class Bot extends EventEmitter {
       if (!this.connectedOnce) events.add(this.userId, 'connected', 'התחבר לוואטסאפ')
       this.connectedOnce = true
       this.emit('open')
-      if (!this.controlChecked) {
-        this.controlChecked = true
-        this.ensureControlGroup().catch(e => this.log('control group error', e.message))
+      if (!this.startupChecked) {
+        this.startupChecked = true
+        this.retireControlGroup().catch(e => this.log('retire control group error', e.message))
         this.lockExistingBackups().catch(e => this.log('lock backups error', e.message))
       }
     }
@@ -113,8 +113,18 @@ export class Bot extends EventEmitter {
     }
   }
 
-  handleLoggedOut () {
-    events.add(this.userId, 'logged_out', 'התנתק מוואטסאפ (מכשיר מקושר הוסר)')
+  /** `byRequest`: the user or the admin disconnected on purpose – no alert needed. */
+  handleLoggedOut (byRequest = false) {
+    events.add(this.userId, 'logged_out', byRequest ? 'נותק מוואטסאפ לפי בקשה' : 'התנתק מוואטסאפ (מכשיר מקושר הוסר)')
+    if (!byRequest) {
+      notifyUser(this.userId, 'disconnect', {
+        body: '🔌 הוואטסאפ התנתק מהשירות והגיבוי נעצר. לחצו כדי לחבר מחדש – כל הגיבויים שמורים.',
+        url: `/join?relink=1`,
+        tag: 'disconnect',
+        urgent: true
+      }).catch(() => {})
+      notifyUser('admin', 'admin', { body: `🔴 ${this.user?.name || this.user?.phone} התנתק מוואטסאפ`, url: '/admin', tag: 'admin-out-' + this.userId }).catch(() => {})
+    }
     this.status = 'logged_out'
     this.stopped = true
     this.sock = null
@@ -135,7 +145,7 @@ export class Bot extends EventEmitter {
   async logout () {
     this.stopped = true
     try { await this.sock?.logout() } catch {}
-    this.handleLoggedOut()
+    this.handleLoggedOut(true)
   }
 
   // ---------- sending ----------
@@ -155,35 +165,24 @@ export class Bot extends EventEmitter {
     return m
   }
 
-  sendControl (text) {
-    const jid = this.user?.control_jid
-    if (!jid) return Promise.reject(new Error('no control group'))
+  /** A short message to the user's own "message yourself" chat (used for login codes). */
+  sendToSelf (text) {
+    const jid = this.user?.phone && this.user.phone + '@s.whatsapp.net'
+    if (!jid) return Promise.reject(new Error('no phone'))
     return this.enqueue(() => this.send(jid, { text }))
   }
 
-  // ---------- control group ----------
-  async ensureControlGroup () {
-    const u = this.user
-    if (u.control_jid) {
-      try {
-        const meta = await this.sock.groupMetadata(u.control_jid)
-        if (meta?.id) return
-      } catch (e) {
-        this.log('control group not reachable, creating a new one:', e.message)
-      }
-    }
-    await this.createControlGroup()
-  }
-
-  /** Creates a fresh main group (also used by the admin when a user lost theirs). */
-  async createControlGroup (reason) {
-    const meta = await this.sock.groupCreate(BOT_NAME, [])
-    users.update(this.userId, { control_jid: meta.id })
-    await this.sock.groupUpdateDescription(meta.id, `קבוצת הניהול של ${BOT_NAME} 🧽\nכתבו כאן *תפריט* כדי לראות מה אפשר לעשות.`).catch(() => {})
-    await this.sendControl(reason ? `🔄 ${reason}\n\n${T.welcome(this.user?.name)}` : T.welcome(this.user?.name))
-    events.add(this.userId, 'control_group', reason ? 'קבוצה ראשית נוצרה מחדש' : 'קבוצה ראשית נוצרה')
-    this.log('created control group', meta.id)
-    return meta.id
+  /**
+   * Management moved to the website. Users who still have the old bot group get one
+   * last message there, and the bot stops using it.
+   */
+  async retireControlGroup () {
+    const jid = this.user.control_jid
+    if (!jid) return
+    users.update(this.userId, { control_jid: null })
+    const site = process.env.SITE_URL || SITE_URL
+    await this.enqueue(() => this.send(jid, { text: `🧽 *${BOT_NAME} עבר לאתר*\n\nמעכשיו כל הניהול – מה לגבות, הגדרות, שיתוף ובקשות הצטרפות – נעשה באתר${site ? `:\n${site}/app` : '.'}\n\nבאתר אפשר להפעיל התראות לטלפון, כדי לקבל עדכונים.\nאת הקבוצה הזו כבר אפשר למחוק 👋` })).catch(() => {})
+    events.add(this.userId, 'control_group', 'הקבוצה הראשית הוחלפה בניהול דרך האתר')
   }
 
   // ---------- incoming messages ----------
@@ -196,10 +195,6 @@ export class Bot extends EventEmitter {
       if (jid === 'status@broadcast' || jid.endsWith('@newsletter')) continue
       if (this.sentIds.has(msg.key.id)) continue
       this.rememberSender(msg)
-      if (jid === u.control_jid) {
-        if (msg.key.fromMe && type === 'notify') await this.commands.handle(msg)
-        continue
-      }
       if (type !== 'notify') continue
       if (backups.byBackupJid(this.userId, jid)) continue
       const b = backups.bySource(this.userId, jid) || (msg.key.remoteJidAlt && backups.bySource(this.userId, msg.key.remoteJidAlt))
@@ -449,7 +444,6 @@ export class Bot extends EventEmitter {
     const q = String(query || '').trim().toLowerCase()
     const u = this.user
     const own = new Set(backups.list(this.userId).map(b => b.backup_jid))
-    own.add(u.control_jid)
     const results = []
     const groups = await this.allGroups().catch(() => [])
     for (const g of groups) {

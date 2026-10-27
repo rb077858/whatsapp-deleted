@@ -80,6 +80,14 @@ CREATE TABLE IF NOT EXISTS join_requests (
   created_at INTEGER NOT NULL
 );
 CREATE INDEX IF NOT EXISTS join_requests_user ON join_requests (user_id, status);
+CREATE TABLE IF NOT EXISTS push_subs (
+  endpoint TEXT PRIMARY KEY,
+  user_id TEXT NOT NULL,
+  keys TEXT NOT NULL,
+  device TEXT,
+  created_at INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS push_subs_user ON push_subs (user_id);
 CREATE TABLE IF NOT EXISTS events (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   ts INTEGER NOT NULL,
@@ -160,7 +168,7 @@ export const users = {
     db.prepare(`UPDATE users SET ${keys.map(k => `${k} = ?`).join(', ')} WHERE id = ?`).run(...vals, id)
   },
   remove (id) {
-    for (const t of ['backups', 'msgmap', 'contacts', 'web_sessions', 'links', 'join_requests']) db.prepare(`DELETE FROM ${t} WHERE user_id = ?`).run(id)
+    for (const t of ['backups', 'msgmap', 'contacts', 'web_sessions', 'links', 'join_requests', 'push_subs']) db.prepare(`DELETE FROM ${t} WHERE user_id = ?`).run(id)
     db.prepare('DELETE FROM users WHERE id = ?').run(id)
   }
 }
@@ -216,6 +224,18 @@ export const joinRequests = {
   pending: userId => db.prepare("SELECT * FROM join_requests WHERE user_id = ? AND status = 'pending' ORDER BY created_at").all(userId),
   pendingFor: (linkId, phone) => db.prepare("SELECT * FROM join_requests WHERE link_id = ? AND phone = ? AND status = 'pending'").get(linkId, phone),
   setStatus: (userId, id, status) => db.prepare('UPDATE join_requests SET status = ? WHERE user_id = ? AND id = ?').run(status, userId, id)
+}
+
+// ---------- push subscriptions (one per browser/device) ----------
+export const pushSubs = {
+  save: (userId, sub, device) => db.prepare(`INSERT INTO push_subs (endpoint, user_id, keys, device, created_at) VALUES (?, ?, ?, ?, ?)
+    ON CONFLICT(endpoint) DO UPDATE SET user_id = excluded.user_id, keys = excluded.keys, device = excluded.device`)
+    .run(String(sub.endpoint), userId, JSON.stringify(sub.keys || {}), device || null, now()),
+  remove: endpoint => db.prepare('DELETE FROM push_subs WHERE endpoint = ?').run(String(endpoint)),
+  forUser: userId => db.prepare('SELECT * FROM push_subs WHERE user_id = ?').all(userId),
+  has: (userId, endpoint) => !!db.prepare('SELECT 1 FROM push_subs WHERE user_id = ? AND endpoint = ?').get(userId, String(endpoint)),
+  count: userId => db.prepare('SELECT COUNT(*) AS n FROM push_subs WHERE user_id = ?').get(userId).n,
+  all: () => db.prepare('SELECT * FROM push_subs').all()
 }
 
 // ---------- event log (for the admin's customer-service view) ----------

@@ -1,7 +1,8 @@
-import { events, links, joinRequests, users, backups, sessions, loginCodes, kvGet, kvSet, normalizePhone, randomCode, sha, checkPassword, hashPassword } from './db.js'
+import { pushSubs, events, links, joinRequests, users, backups, sessions, loginCodes, kvGet, kvSet, normalizePhone, randomCode, sha, checkPassword, hashPassword } from './db.js'
 import { bots, startBot, stopBot, registrationError, startJoin, cancelJoin } from './manager.js'
 import { mergeSettings, BOT_NAME, TYPE_LABELS } from './config.js'
 import * as T from './text.js'
+import { publicKey as pushPublicKey, notifyUser, notifyAll } from './push.js'
 import { memory, skipped } from './guard.js'
 import { publicLinkInfo, joinByLink, decideRequest, linkView, linkFields } from './sharing.js'
 
@@ -76,12 +77,12 @@ export const handlers = {
     const user = users.byPhone(pn)
     if (!user) fail('המספר הזה עוד לא רשום. הצטרפו קודם 🙂')
     const bot = bots.get(user.id)
-    if (!bot || bot.status !== 'open' || !user.control_jid) fail('הוואטסאפ של המספר הזה לא מחובר כרגע. אפשר להתחבר מחדש דרך "הצטרפות".')
+    if (!bot || bot.status !== 'open') fail('הוואטסאפ של המספר הזה לא מחובר כרגע. אפשר להתחבר מחדש דרך "הצטרפות".')
     const prev = loginCodes.get(pn)
     if (prev && prev.expires - 4 * 60000 > Date.now()) fail('כבר שלחתי קוד לפני רגע, בדקו בקבוצה.')
     const code = randomCode()
     loginCodes.set(pn, code)
-    await bot.sendControl(T.loginCode(code))
+    await bot.sendToSelf(T.loginCode(code))
     return { sent: true, botName: BOT_NAME }
   },
 
@@ -131,7 +132,6 @@ export const handlers = {
       }
     }
     const ok = out.filter(o => o.ok).map(o => `✅ ${o.name}`)
-    if (ok.length) bot.sendControl(`💻 נוספו גיבויים מהממשק:\n${ok.join('\n')}`).catch(() => {})
     return { results: out }
   },
 
@@ -220,7 +220,7 @@ export const handlers = {
     const s = mergeSettings(user.settings)
     const inc = settings || {}
     for (const k of Object.keys(s.types)) if (typeof inc.types?.[k] === 'boolean') s.types[k] = inc.types[k]
-    for (const k of ['alertDeleted', 'alertEdited', 'includeOwn', 'paused']) if (typeof inc[k] === 'boolean') s[k] = inc[k]
+    for (const k of ['alertDeleted', 'alertEdited', 'includeOwn', 'paused', 'notifyRequests', 'notifyDisconnect', 'notifyJoins']) if (typeof inc[k] === 'boolean') s[k] = inc[k]
     if (Number.isFinite(inc.maxMediaMB)) s.maxMediaMB = Math.max(1, Math.min(100, Math.round(inc.maxMediaMB)))
     users.update(user.id, { settings: s })
     return { settings: s }
@@ -257,7 +257,7 @@ export const handlers = {
     requireAdmin(token)
     const list = users.all().map(u => {
       const b = backups.list(u.id)
-      return { id: u.id, phone: u.phone, name: u.name, status: userStatus(u), backups: b.length, messages: b.reduce((a, x) => a + x.count, 0), createdAt: u.created_at, lastSeen: u.last_seen, paused: !!u.settings.paused, requests: joinRequests.pending(u.id).length, note: u.admin_note || '' }
+      return { id: u.id, phone: u.phone, name: u.name, status: userStatus(u), backups: b.length, messages: b.reduce((a, x) => a + x.count, 0), createdAt: u.created_at, lastSeen: u.last_seen, paused: !!u.settings.paused, requests: joinRequests.pending(u.id).length, note: u.admin_note || '', push: pushSubs.count(u.id) }
     })
     const names = Object.fromEntries(list.map(u => [u.id, u.name || u.phone]))
     return {
@@ -292,7 +292,7 @@ export const handlers = {
     const u = users.get(userId) || fail('משתמש לא נמצא.')
     const bot = bots.get(u.id)
     return {
-      user: { id: u.id, phone: u.phone, name: u.name, status: userStatus(u), createdAt: u.created_at, lastSeen: u.last_seen, note: u.admin_note || '', settings: u.settings, hasControl: !!u.control_jid },
+      user: { id: u.id, phone: u.phone, name: u.name, status: userStatus(u), createdAt: u.created_at, lastSeen: u.last_seen, note: u.admin_note || '', settings: u.settings, pushDevices: pushSubs.count(u.id) },
       backups: backups.list(u.id).map(b => ({ id: b.id, name: b.source_name, kind: b.kind, active: !!b.active, count: b.count, createdAt: b.created_at, links: links.forBackup(u.id, b.id).length })),
       requests: joinRequests.pending(u.id).length,
       events: events.recent(60, u.id),
@@ -323,9 +323,6 @@ export const handlers = {
         bots.delete(user.id)
         users.remove(user.id)
         return { message: 'המשתמש נמחק' }
-      case 'recreateControl':
-        await live().createControlGroup('צוות אל-מחיק יצר לך קבוצה ראשית חדשה.')
-        return { message: 'נוצרה קבוצה ראשית חדשה' }
       case 'relock':
         for (const b of backups.list(user.id)) await live().lockGroup(b.backup_jid)
         log('המנהל נעל מחדש את קבוצות הגיבוי')
@@ -398,20 +395,52 @@ export const handlers = {
     return {}
   },
 
-  async adminMessage ({ token, userId, text }) {
+  /** Push notification from the admin, to one user or to everyone. */
+  async adminMessage ({ token, userId, title, text, url }) {
     requireAdmin(token)
-    const msg = String(text || '').trim().slice(0, 2000) || fail('כתבו הודעה.')
-    const targets = userId ? [bots.get(String(userId))] : [...bots.values()]
-    let sent = 0
-    for (const bot of targets) {
-      if (bot?.status !== 'open') continue
-      try {
-        await bot.sendControl(`📣 *הודעה מצוות ${BOT_NAME}*\n\n${msg}`)
-        sent++
-        events.add(bot.userId, 'admin', `הודעה מהמנהל: ${msg.slice(0, 80)}`)
-      } catch {}
+    const body = String(text || '').trim().slice(0, 500) || fail('כתבו הודעה.')
+    const payload = { title: String(title || '').trim().slice(0, 80) || `📣 ${BOT_NAME}`, body, url: typeof url === 'string' && url.startsWith('/') ? url : '/app', tag: 'admin-' + Date.now() }
+    if (userId) {
+      const user = users.get(String(userId)) || fail('משתמש לא נמצא.')
+      const sent = await notifyUser(user.id, 'admin', payload)
+      if (!sent) fail('למשתמש הזה אין התראות פעילות באף מכשיר.')
+      events.add(user.id, 'push', `התראה מהמנהל: ${body.slice(0, 80)}`)
+      return { sent }
     }
-    if (!sent) fail(userId ? 'הוואטסאפ של המשתמש לא מחובר כרגע.' : 'אין משתמשים מחוברים כרגע.')
+    const sent = await notifyAll(payload)
+    if (!sent) fail('אין עדיין משתמשים שהפעילו התראות.')
+    return { sent }
+  },
+
+  // ---------- push notifications ----------
+  pushKey () { return { key: pushPublicKey() } },
+
+  pushSubscribe ({ token, sub, device }) {
+    const s = sessions.get(token)
+    if (!s) fail('AUTH')
+    if (!sub?.endpoint || !/^https:\/\//.test(sub.endpoint) || !sub.keys?.p256dh || !sub.keys?.auth) fail('המנוי להתראות לא תקין.')
+    pushSubs.save(s.role === 'admin' ? 'admin' : s.user_id, { endpoint: sub.endpoint, keys: { p256dh: String(sub.keys.p256dh), auth: String(sub.keys.auth) } }, String(device || '').slice(0, 80))
+    return { ok: true }
+  },
+
+  pushUnsubscribe ({ token, endpoint }) {
+    if (!sessions.get(token)) fail('AUTH')
+    pushSubs.remove(String(endpoint || ''))
+    return {}
+  },
+
+  pushStatus ({ token, endpoint }) {
+    const s = sessions.get(token)
+    if (!s) fail('AUTH')
+    const who = s.role === 'admin' ? 'admin' : s.user_id
+    return { subscribed: !!endpoint && pushSubs.has(who, endpoint), devices: pushSubs.count(who) }
+  },
+
+  async pushTest ({ token }) {
+    const s = sessions.get(token)
+    if (!s) fail('AUTH')
+    const sent = await notifyUser(s.role === 'admin' ? 'admin' : s.user_id, 'admin', { body: '🔔 ההתראות עובדות! מכאן תקבלו עדכונים על השירות.', url: s.role === 'admin' ? '/admin' : '/app', tag: 'test' })
+    if (!sent) fail('לא הצלחתי לשלוח – נסו לכבות ולהדליק את ההתראות.')
     return { sent }
   }
 }
