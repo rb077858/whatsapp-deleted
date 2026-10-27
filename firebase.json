@@ -4,7 +4,10 @@
     "ignore": ["setup.html"],
     "cleanUrls": true,
     "rewrites": [{ "source": "**", "destination": "/index.html" }],
-    "headers": [{ "source": "**/*.@(js|css)", "headers": [{ "key": "Cache-Control", "value": "no-cache" }] }]
+    "headers": [
+      { "source": "**/*.@(js|css|webmanifest)", "headers": [{ "key": "Cache-Control", "value": "no-cache" }] },
+      { "source": "/sw.js", "headers": [{ "key": "Service-Worker-Allowed", "value": "/" }] }
+    ]
   },
   "firestore": {
     "rules": "firestore.rules",

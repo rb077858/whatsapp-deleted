@@ -10,6 +10,9 @@ const { users, backups, contacts, sessions } = await import('../src/db.js')
 const { Bot } = await import('../src/bot.js')
 const { bots } = await import('../src/manager.js')
 const { handlers } = await import('../src/api.js')
+const push = await import('../src/push.js')
+const pushed = []
+push.transport.send = async (sub, body) => { pushed.push({ endpoint: sub.endpoint, ...JSON.parse(body) }) }
 const { proto } = await import('baileys')
 
 let n = 0
@@ -31,7 +34,7 @@ function fakeSocket () {
 }
 
 const u = users.create('972501234567')
-users.update(u.id, { control_jid: 'ctrl@g.us', name: 'רועי' })
+users.update(u.id, { name: 'רועי' })
 const bot = new Bot(u.id)
 bot.status = 'open'
 bot.sock = fakeSocket()
@@ -39,22 +42,24 @@ bots.set(u.id, bot)
 contacts.upsert(u.id, { jid: '972521111111@s.whatsapp.net', name: 'אמא כהן' })
 
 const settle = async () => { await bot.queue; await new Promise(r => setTimeout(r, 30)) }
-const say = async text => {
-  await bot.onMessages({ type: 'notify', messages: [{ key: { remoteJid: 'ctrl@g.us', fromMe: true, id: 'U' + (++n) }, message: { conversation: text } }] })
-  await settle()
-  return sent.at(-1).content.text
-}
 const groupMsg = (id, message, key = {}) => ({ key: { remoteJid: 'fam@g.us', participant: '972533333333@s.whatsapp.net', id, ...key }, pushName: 'דני', message })
 const incoming = async (...msgs) => { await bot.onMessages({ type: 'notify', messages: msgs }); await settle() }
 
-// commands: search → pick → confirm creates backup groups
-assert.match(await say('כהן'), /משפחה כהן/)
-assert.match(await say('1,2'), /לגבות את/)
-assert.match(await say('כן'), /✅ משפחה כהן/)
+const token = sessions.create(u.id)
+
+// the dashboard flow: search, then create backup groups
+const found = (await handlers.searchChats({ token, query: 'כהן' })).results
+assert.deepEqual(found.map(r => r.name).sort(), ['אמא כהן', 'משפחה כהן'])
+const added = await handlers.addBackups({ token, chats: found.map(r => ({ jid: r.jid, name: r.name })) })
+assert.ok(added.results.every(r => r.ok))
 const fam = backups.bySource(u.id, 'fam@g.us')
 assert.ok(fam, 'backup group created')
-assert.match(await say('הגדרות'), /הגדרות/)
-assert.match(await say('סיום'), /נשמרו/)
+
+// login code goes to the user's own "message yourself" chat
+await handlers.loginStart({ phone: '050-1234567' })
+await settle()
+assert.equal(sent.at(-1).jid, '972501234567@s.whatsapp.net')
+assert.match(sent.at(-1).content.text, /קוד הכניסה/)
 
 // backup: text, quote, edit and delete alerts, own messages, location
 const inBackup = () => sent.filter(s => s.jid === fam.backup_jid)
@@ -86,11 +91,30 @@ await incoming({ key: { remoteJid: fam.backup_jid, fromMe: true, id: 'X1' }, mes
 assert.equal(sent.length, count)
 
 // sharing: add by phone and a join link
-const token = sessions.create(u.id)
 assert.deepEqual(await handlers.addMember({ token, id: fam.id, phone: '0521231234' }), { status: 'added' })
 const link = (await handlers.createLink({ token, id: fam.id, options: { maxUses: 1 } })).link
 assert.deepEqual(await handlers.linkJoin({ link: link.id, phone: '0521231235' }), { status: 'added' })
 await assert.rejects(handlers.linkJoin({ link: link.id, phone: '0521231236' }), /מלאה/)
+
+// notifications: subscribe, join request with approve/reject buttons, admin message, disconnect alert
+await handlers.pushSubscribe({ token, sub: { endpoint: 'https://push.example/1', keys: { p256dh: 'k', auth: 'a' } }, device: 'test' })
+assert.equal((await handlers.pushStatus({ token, endpoint: 'https://push.example/1' })).subscribed, true)
+const approvalLink = (await handlers.createLink({ token, id: fam.id, options: { approval: true } })).link
+assert.deepEqual(await handlers.linkJoin({ link: approvalLink.id, phone: '0507777777', name: 'דנה' }), { status: 'pending' })
+await settle()
+const req = pushed.at(-1)
+assert.match(req.body, /דנה/)
+assert.deepEqual(req.actions.map(a => a.action), ['approve', 'reject'])
+const reqId = Number(new URL(req.actions[0].url, 'https://x').searchParams.get('req'))
+assert.deepEqual(await handlers.decideRequest({ token, requestId: reqId, approve: true }), { status: 'added' })
+const admin = sessions.create('admin', 'admin')
+assert.deepEqual(await handlers.adminMessage({ token: admin, userId: u.id, text: 'שלום מהצוות' }), { sent: 1 })
+assert.equal(pushed.at(-1).body, 'שלום מהצוות')
+users.update(u.id, { settings: { ...users.get(u.id).settings, notifyDisconnect: false } })
+const before2 = pushed.length
+bot.handleLoggedOut()
+await settle()
+assert.equal(pushed.length, before2, 'disconnect alert respects the user setting')
 
 console.log('✔ smoke test passed')
 process.exit(0)

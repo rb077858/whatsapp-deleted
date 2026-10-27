@@ -25,7 +25,10 @@ export const DEFAULT_USER_SETTINGS = {
   alertEdited: true,
   includeOwn: true,
   paused: false,
-  maxMediaMB: 16
+  maxMediaMB: 16,
+  notifyRequests: true,
+  notifyDisconnect: true,
+  notifyJoins: true
 }
 
 export const TYPE_LABELS = {

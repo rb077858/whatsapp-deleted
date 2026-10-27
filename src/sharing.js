@@ -1,6 +1,7 @@
 // Sharing a backup group: adding people by phone, join links with rules, and approval requests.
 import { links, joinRequests, backups, contacts, users, normalizePhone, events } from './db.js'
 import { bots } from './manager.js'
+import { notifyUser } from './push.js'
 
 export class ShareError extends Error {}
 const fail = msg => { throw new ShareError(msg) }
@@ -62,14 +63,29 @@ export async function joinByLink (id, phoneInput, name) {
     if (joinRequests.pendingFor(link.id, phone)) return { status: 'pending' }
     const req = joinRequests.add({ link_id: link.id, user_id: link.user_id, backup_id: link.backup_id, phone, name: String(name || '').trim().slice(0, 60) })
     const b = backups.get(link.user_id, link.backup_id)
-    bots.get(link.user_id)?.sendControl(
-      `🙋 *${req.name || fmtPhone(phone)}*${req.name ? ` (${fmtPhone(phone)})` : ''} מבקש/ת להצטרף ל-*${b.source_name} (הודעות)*` +
-      `${link.label ? ` דרך הקישור "${link.label}"` : ''}.\n\nלאישור: *אשר ${req.id}*   ·   לדחייה: *דחה ${req.id}*`
-    ).catch(() => {})
+    notifyUser(link.user_id, 'request', {
+      title: '🙋 בקשת הצטרפות',
+      body: `${req.name || fmtPhone(phone)}${req.name ? ` (${fmtPhone(phone)})` : ''} מבקש/ת להצטרף ל${b.source_name} (הודעות)${link.label ? ` · ${link.label}` : ''}`,
+      url: '/app#requests',
+      tag: `req-${req.id}`,
+      urgent: true,
+      actions: [
+        { action: 'approve', title: '✅ אישור', url: `/app?req=${req.id}&act=approve` },
+        { action: 'reject', title: '🚫 דחייה', url: `/app?req=${req.id}&act=reject` }
+      ]
+    }).catch(() => {})
     return { status: 'pending' }
   }
   const status = await addNow(link, phone)
   events.add(link.user_id, 'link', `${fmtPhone(phone)} הצטרף דרך קישור (${status})`)
+  if (status !== 'already') {
+    const b = backups.get(link.user_id, link.backup_id)
+    notifyUser(link.user_id, 'join', {
+      body: `${fmtPhone(phone)} ${status === 'invited' ? 'קיבל/ה הזמנה ל' : 'הצטרף/ה ל'}${b.source_name} (הודעות) דרך ${link.label ? `הקישור "${link.label}"` : 'קישור'}`,
+      url: '/app',
+      tag: `join-${link.id}`
+    }).catch(() => {})
+  }
   return { status }
 }
 
