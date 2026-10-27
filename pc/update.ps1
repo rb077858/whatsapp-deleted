@@ -5,35 +5,38 @@ $ErrorActionPreference = 'Stop'
 $ProgressPreference = 'SilentlyContinue'
 [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
 
-$Root = (Resolve-Path $Root).Path
+$Root = (Resolve-Path -LiteralPath $Root).Path
 $App = Join-Path $Root 'app'
-$zip = Join-Path $env:TEMP 'al-mahik.zip'
-$tmp = Join-Path $env:TEMP ('al-mahik-' + [guid]::NewGuid())
+# work inside the install folder, not %TEMP% (short 8.3 path for non-English user names)
+$tmp = Join-Path $Root '_download'
+if (Test-Path -LiteralPath $tmp) { Remove-Item -LiteralPath $tmp -Recurse -Force }
+New-Item -ItemType Directory -Force -Path $tmp | Out-Null
+$zip = Join-Path $tmp 'al-mahik.zip'
 
 Write-Host 'Downloading the latest version...' -ForegroundColor Cyan
 Invoke-WebRequest 'https://github.com/rb077858/whatsapp-deleted/archive/refs/heads/main.zip' -OutFile $zip -UseBasicParsing
-Expand-Archive -Path $zip -DestinationPath $tmp
+Expand-Archive -LiteralPath $zip -DestinationPath $tmp
 $New = Join-Path $tmp 'whatsapp-deleted-main'
 
 $lock = 'package-lock.json'
-$sameLock = (Test-Path (Join-Path $App $lock)) -and
-  ((Get-FileHash (Join-Path $App $lock)).Hash -eq (Get-FileHash (Join-Path $New $lock)).Hash)
-if ($sameLock -and (Test-Path (Join-Path $App 'node_modules'))) {
-  Move-Item (Join-Path $App 'node_modules') (Join-Path $New 'node_modules')
+$sameLock = (Test-Path -LiteralPath (Join-Path $App $lock)) -and
+  ((Get-FileHash -LiteralPath (Join-Path $App $lock)).Hash -eq (Get-FileHash -LiteralPath (Join-Path $New $lock)).Hash)
+if ($sameLock -and (Test-Path -LiteralPath (Join-Path $App 'node_modules'))) {
+  Move-Item -LiteralPath (Join-Path $App 'node_modules') -Destination (Join-Path $New 'node_modules')
 }
 
 try {
-  if (Test-Path $App) { Remove-Item $App -Recurse -Force }
+  if (Test-Path -LiteralPath $App) { Remove-Item -LiteralPath $App -Recurse -Force }
 } catch {
   Write-Host 'Could not replace the app folder - close the Al-Mahik window (start.bat) and run update.bat again.' -ForegroundColor Red
-  Remove-Item $zip, $tmp -Recurse -Force -ErrorAction SilentlyContinue
+  Remove-Item -LiteralPath $tmp -Recurse -Force -ErrorAction SilentlyContinue
   exit 1
 }
-Move-Item $New $App
-Copy-Item (Join-Path $App 'pc\start.bat'), (Join-Path $App 'pc\update.bat') $Root -Force
-Remove-Item $zip, $tmp -Recurse -Force -ErrorAction SilentlyContinue
+Move-Item -LiteralPath $New -Destination $App
+Copy-Item -LiteralPath (Join-Path $App 'pc\start.bat'), (Join-Path $App 'pc\update.bat') -Destination $Root -Force
+Remove-Item -LiteralPath $tmp -Recurse -Force -ErrorAction SilentlyContinue
 
-if (-not (Test-Path (Join-Path $App 'node_modules'))) {
+if (-not (Test-Path -LiteralPath (Join-Path $App 'node_modules'))) {
   Write-Host 'Packages changed - installing...' -ForegroundColor Cyan
   Push-Location $App
   npm ci --omit=dev --no-audit --no-fund
